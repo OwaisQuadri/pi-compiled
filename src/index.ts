@@ -31,7 +31,7 @@ export function progressOf(line: string): BuildProgress {
 
 export function progressBar(progress: BuildProgress, width = 20): string {
 	const visible = progress.line
-		.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\|$)/g, "")
+		.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\?|$)/g, "")
 		.replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, "")
 		.replace(/\x1b[ -\/]*[0-~]/g, "")
 		.replace(/[\x00-\x1f\x7f]/g, "");

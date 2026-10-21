@@ -8,7 +8,7 @@ export function progressOf(line) {
 }
 export function progressBar(progress, width = 20) {
     const visible = progress.line
-        .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\|$)/g, "")
+        .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\?|$)/g, "")
         .replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, "")
         .replace(/\x1b[ -\/]*[0-~]/g, "")
         .replace(/[\x00-\x1f\x7f]/g, "");

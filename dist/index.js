@@ -7,7 +7,12 @@ export function progressOf(line) {
     return match ? { line: match[3] ?? "", completed: Number(match[1]), total: Number(match[2]) } : { line };
 }
 export function progressBar(progress, width = 20) {
-    const line = progress.line.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, "").replace(/[\x00-\x1f\x7f]/g, "").slice(0, 120);
+    const visible = progress.line
+        .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")
+        .replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, "")
+        .replace(/\x1b[ -\/]*[0-~]/g, "")
+        .replace(/[\x00-\x1f\x7f]/g, "");
+    const line = Array.from(visible).slice(0, 120).join("");
     if (progress.completed === undefined || !progress.total)
         return line;
     const filled = Math.min(width, Math.round((progress.completed / progress.total) * width));

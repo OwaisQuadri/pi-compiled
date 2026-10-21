@@ -30,7 +30,12 @@ export function progressOf(line: string): BuildProgress {
 }
 
 export function progressBar(progress: BuildProgress, width = 20): string {
-	const line = progress.line.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, "").replace(/[\x00-\x1f\x7f]/g, "").slice(0, 120);
+	const visible = progress.line
+		.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")
+		.replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, "")
+		.replace(/\x1b[ -\/]*[0-~]/g, "")
+		.replace(/[\x00-\x1f\x7f]/g, "");
+	const line = Array.from(visible).slice(0, 120).join("");
 	if (progress.completed === undefined || !progress.total) return line;
 	const filled = Math.min(width, Math.round((progress.completed / progress.total) * width));
 	return `[${"█".repeat(filled)}${"░".repeat(width - filled)}] ${progress.completed}/${progress.total} ${line}`;

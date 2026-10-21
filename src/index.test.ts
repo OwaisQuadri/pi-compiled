@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { BuildError, ensureBuilt, isBuildNeeded, lockPath, type BuildSpec } from "./index.ts";
+import { BuildError, ensureBuilt, isBuildNeeded, lockPath, progressBar, progressOf, type BuildProgress, type BuildSpec } from "./index.ts";
 
 function checkout(): string {
 	const root = mkdtempSync(join(tmpdir(), "pi-compiled-test-"));
@@ -69,6 +69,31 @@ test("a built binary in a package that Git cannot check is used as is, so a work
 	assert.equal(await ensureBuilt(spec(root, "exit 1")), join(root, "bin/tool"));
 });
 
+test("build output reaches onProgress line by line with step counts, so the user sees how far the build is", async () => {
+	const root = checkout();
+	const seen: BuildProgress[] = [];
+	await ensureBuilt(spec(root, "printf 'Building\\n[1/4] Compiling a\\n'; sleep 0.1; printf '[2/4] Comp'; sleep 0.1; printf 'iling b\\n'; printf 'a warning\\n' >&2; mkdir -p bin && touch bin/tool"), { onProgress: (progress) => seen.push(progress) });
+	assert.deepEqual(seen.filter((progress) => progress.line !== "a warning"), [{ line: "Building" }, { line: "Compiling a", completed: 1, total: 4 }, { line: "Compiling b", completed: 2, total: 4 }]);
+	assert.ok(seen.some((progress) => progress.line === "a warning"));
+	rmSync(join(root, "bin/tool"));
+	const first: string[] = [];
+	const second: string[] = [];
+	const slow = spec(root, "sleep 0.3; mkdir -p bin && touch bin/tool; printf 'Build complete!'");
+	await Promise.all([ensureBuilt(slow, { onProgress: (progress) => { first.push(progress.line); } }), ensureBuilt(slow, { onProgress: async (progress) => { second.push(progress.line); throw new Error("ignored"); } })]);
+	assert.deepEqual(first, ["Build complete!"]);
+	assert.deepEqual(second, ["Build complete!"]);
+	assert.equal(progressBar({ line: "Compiling a", completed: 1, total: 4 }, 8), "[██░░░░░░] 1/4 Compiling a");
+	assert.equal(progressBar({ line: "Linking" }), "Linking");
+	assert.equal(progressBar({ line: "\x1b[1;32mLinking\x1b[0m\r\x07" }), "Linking");
+	assert.equal(progressBar({ line: "x".repeat(500) }).length, 120);
+	assert.equal(progressBar({ line: "\x1b[38:5:196mred\x1b[>4;1m \x1b]8;;https://e.x\x07link\x1b]8;;\x1b\\ \x1b(Bdone" }), "red link done");
+	assert.equal(progressBar({ line: "open \x1b]8;;https://e.x" }), "open ");
+	assert.equal(progressBar({ line: "a\x1b]8;;https://e.x\x1bXb" }), "aXb");
+	assert.equal(progressBar({ line: "x".repeat(119) + "😀" }), "x".repeat(119) + "😀");
+	assert.equal(progressBar({ line: "x".repeat(120) + "😀" }), "x".repeat(120));
+	assert.deepEqual(progressOf("[98 / 103] Compiling c"), { line: "Compiling c", completed: 98, total: 103 });
+});
+
 test("a build that exits 75 is a failure, not a busy lock, so a broken build is never retried as busy", async () => {
 	await assert.rejects(ensureBuilt(spec(checkout(), "exit 75")), (error: BuildError) => error.code === "build-failed");
 });
@@ -90,6 +115,14 @@ test("kills the whole process group on timeout, so a hung build leaves no orphan
 	const pid = Number(readFileSync(join(root, "grandchild"), "utf8"));
 	await new Promise((done) => setTimeout(done, 100));
 	assert.throws(() => process.kill(pid, 0));
+});
+
+test("a build that leaves a process holding stdout succeeds promptly, so a toolchain daemon does not hold up the result", async () => {
+	const root = checkout();
+	const started = Date.now();
+	assert.equal(await ensureBuilt(spec(root, "sleep 30 & echo $! > daemon; mkdir -p bin && touch bin/tool", 5000)), join(root, "bin/tool"));
+	assert.ok(Date.now() - started < 3000);
+	process.kill(Number(readFileSync(join(root, "daemon"), "utf8")), "SIGKILL");
 });
 
 test("a build that leaves a process holding stderr succeeds and releases the lock, so a toolchain daemon neither fakes a timeout nor blocks later builds", async () => {

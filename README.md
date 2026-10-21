@@ -26,7 +26,9 @@ interface BuildSpec {
 class BuildError extends Error { code: "build-refused" | "build-failed" | "build-timeout" | "build-busy" }
 ```
 
-`lockPath` returns the lock file for a spec. `ensureBuilt` returns the absolute binary path. The build runs in its own process group with only allowlisted variables. On timeout the whole group is killed (`build-timeout`). Concurrent calls in one process share one build, and a lock file in the temp directory serializes builds across Pi sessions. A session waits for another session's lock for up to `timeoutMs`, then fails with `build-busy`; a lock whose owner process died is taken over. The binary must exist after the build.
+`lockPath` returns the lock file for a spec. `ensureBuilt` returns the absolute binary path. The build runs in its own process group with only allowlisted variables. Concurrent calls in one process share one build. Across Pi sessions, a kernel file lock on `<binary>.lock` serializes builds (`/usr/bin/lockf` on macOS, `flock` on Linux). The kernel releases it when the holder dies. A session waits up to `timeoutMs` for the lock, then fails with `build-busy`. After it gets the lock, it skips the build when another session already made the binary. When the lock wait and the build together pass twice `timeoutMs`, the whole group is killed (`build-timeout`). The binary must exist after the build.
+
+The build command must start with an absolute path, so it does not depend on the caller's `PATH`. An override binary must be executable. Build scripts must write the binary to a temporary file and rename it into place: a session that finds the binary without taking the lock uses it at once.
 
 `refusalReason` returns an empty string when a build is allowed. Use it with `isBuildNeeded` to ask the user before building.
 
@@ -59,7 +61,7 @@ pi.on("session_start", async (_event, ctx) => {
 });
 ```
 
-List specific paths in `inputs`, never `.`. Pi installs this package into the consumer's ignored `node_modules`, so `.` always refuses the build. Keep the binary's output directory out of `inputs`, and list it in `.gitignore`.
+List specific paths in `inputs`, never `.`. Pi installs this package into the consumer's ignored `node_modules`, so `.` always refuses the build. Keep the binary's output directory, which also holds `<binary>.lock`, out of `inputs`, and list it in `.gitignore`.
 
 ## Development
 

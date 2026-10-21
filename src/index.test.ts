@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { BuildError, ensureBuilt, lockPath, type BuildSpec } from "./index.ts";
 
@@ -33,12 +33,15 @@ test("refuses ignored files and paths outside the package, so nothing unreviewed
 	for (const inputs of [["../outside"], [":(top)source.txt"]]) {
 		await assert.rejects(ensureBuilt({ ...spec(root, "true"), inputs }), (error: BuildError) => error.code === "build-refused" && /not inside/.test(error.message));
 	}
+	await assert.rejects(ensureBuilt({ ...spec(root, "true"), buildCommand: ["make"] }), (error: BuildError) => error.code === "build-refused" && /absolute/.test(error.message));
 });
 
 test("an override binary skips the build, so a prebuilt tool is used as is", async () => {
 	const root = checkout();
 	process.env.PI_BUILD_ON_USE_TEST_TOOL = "/usr/bin/true";
 	assert.equal(await ensureBuilt({ ...spec(root, "exit 1"), overrideEnv: "PI_BUILD_ON_USE_TEST_TOOL" }), "/usr/bin/true");
+	process.env.PI_BUILD_ON_USE_TEST_TOOL = join(root, "missing");
+	await assert.rejects(ensureBuilt({ ...spec(root, "exit 1"), overrideEnv: "PI_BUILD_ON_USE_TEST_TOOL" }), (error: BuildError) => error.code === "build-failed");
 	delete process.env.PI_BUILD_ON_USE_TEST_TOOL;
 });
 
@@ -50,25 +53,33 @@ test("kills the whole process group on timeout, so a hung build leaves no orphan
 	assert.throws(() => process.kill(pid, 0));
 });
 
-test("a lock left by a dead process is taken over, so a crashed session does not block builds forever", async () => {
-	const root = checkout();
-	const build = spec(root, "mkdir -p bin && touch bin/tool");
-	const dead = spawn("/usr/bin/true");
-	await new Promise((done) => dead.on("close", done));
-	writeFileSync(lockPath(build), String(dead.pid));
-	assert.equal(await ensureBuilt(build), join(root, "bin/tool"));
-	assert.equal(existsSync(lockPath(build)), false);
-});
+function holdLock(lock: string, script: string) {
+	mkdirSync(dirname(lock), { recursive: true });
+	return spawn("/usr/bin/lockf", ["-k", lock, "/bin/zsh", "-fc", script], { cwd: dirname(dirname(lock)), detached: true });
+}
 
-test("a lock held by a live process makes another session wait, so two sessions never build at once", async () => {
+test("a lock held by another session makes this one wait and skip a finished build, so two sessions never build at once", async () => {
 	const root = checkout();
-	const build = spec(root, "mkdir -p bin && touch bin/tool");
-	writeFileSync(lockPath(build), String(process.ppid));
+	const build = spec(root, "print x >> count; mkdir -p bin && touch bin/tool");
+	const holder = holdLock(lockPath(build), "sleep 1; touch bin/tool");
+	await new Promise((done) => setTimeout(done, 200));
 	const result = ensureBuilt(build);
 	await new Promise((done) => setTimeout(done, 400));
 	assert.equal(existsSync(join(root, "bin/tool")), false);
-	unlinkSync(lockPath(build));
+	await new Promise((done) => holder.on("close", done));
 	assert.equal(await result, join(root, "bin/tool"));
+	assert.equal(existsSync(join(root, "count")), false);
+});
+
+test("a lock is released when its holder dies, and a held lock fails as busy, so a crashed session never blocks builds", async () => {
+	const root = checkout();
+	const build = spec(root, "mkdir -p bin && touch bin/tool", 1000);
+	const holder = holdLock(lockPath(build), "sleep 30");
+	await new Promise((done) => setTimeout(done, 200));
+	await assert.rejects(ensureBuilt(build), (error: BuildError) => error.code === "build-busy");
+	process.kill(-(holder.pid ?? 0), "SIGKILL");
+	await new Promise((done) => holder.on("close", done));
+	assert.equal(await ensureBuilt(build), join(root, "bin/tool"));
 });
 
 test("the shipped dist matches the source, so consumers never run stale code", () => {

@@ -1,9 +1,6 @@
 import { execFile, spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
-import { existsSync, linkSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { setTimeout as sleep } from "node:timers/promises";
+import { accessSync, constants, existsSync, mkdirSync, realpathSync } from "node:fs";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 export class BuildError extends Error {
     code;
     constructor(code, message) {
@@ -16,23 +13,35 @@ const baseVariables = ["PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "DEVELOPER_D
 const defaultTimeoutMs = 600_000;
 const inFlight = new Map();
 export function lockPath(spec) {
-    return join(tmpdir(), `pi-build-on-use-${createHash("sha256").update(resolve(spec.packageRoot, spec.binary)).digest("hex").slice(0, 16)}.lock`);
+    return `${resolve(spec.packageRoot, spec.binary)}.lock`;
+}
+function override(spec) {
+    return spec.overrideEnv ? process.env[spec.overrideEnv] || undefined : undefined;
 }
 export function binaryPath(spec) {
-    const override = spec.overrideEnv ? process.env[spec.overrideEnv] : undefined;
-    return override || resolve(spec.packageRoot, spec.binary);
+    return override(spec) ?? resolve(spec.packageRoot, spec.binary);
 }
 export function isBuildNeeded(spec) {
-    return !(spec.overrideEnv && process.env[spec.overrideEnv]) && !existsSync(resolve(spec.packageRoot, spec.binary));
+    return override(spec) === undefined && !existsSync(resolve(spec.packageRoot, spec.binary));
 }
 export function ensureBuilt(spec) {
+    const prebuilt = override(spec);
+    if (prebuilt !== undefined) {
+        try {
+            accessSync(prebuilt, constants.X_OK);
+        }
+        catch {
+            return Promise.reject(new BuildError("build-failed", `${spec.overrideEnv} names ${prebuilt}, which is not an executable file.`));
+        }
+        return Promise.resolve(prebuilt);
+    }
     if (!isBuildNeeded(spec))
         return Promise.resolve(binaryPath(spec));
     const key = resolve(spec.packageRoot, spec.binary);
     const existing = inFlight.get(key);
     if (existing)
         return existing;
-    const build = buildLocked(spec, key, lockPath(spec)).finally(() => inFlight.delete(key));
+    const build = buildLocked(spec, key).finally(() => inFlight.delete(key));
     inFlight.set(key, build);
     return build;
 }
@@ -41,6 +50,8 @@ function isInside(root, path) {
     return relativePath !== "" && relativePath !== ".." && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath);
 }
 export async function refusalReason(spec) {
+    if (!isAbsolute(spec.buildCommand[0] ?? ""))
+        return "the build command must start with an absolute path.";
     const outside = [spec.binary, ...spec.inputs].filter((path) => path.startsWith(":") || !isInside(spec.packageRoot, path));
     if (outside.length)
         return `these paths are not inside the package: ${outside.join(", ")}.`;
@@ -52,86 +63,15 @@ export async function refusalReason(spec) {
     const changes = await git(spec.packageRoot, ["status", "--porcelain", "--ignored", "--untracked-files=all", "--", ...spec.inputs]);
     return changes ? `the build inputs have uncommitted or ignored changes:\n${changes}\n` : "";
 }
-async function buildLocked(spec, key, lock) {
-    const timeoutMs = spec.timeoutMs ?? defaultTimeoutMs;
-    await acquire(lock, timeoutMs);
-    try {
-        if (existsSync(key))
-            return key;
-        const refusal = await refusalReason(spec);
-        if (refusal)
-            throw new BuildError("build-refused", `Refused to build ${spec.binary}: ${refusal}`);
-        await run(spec, timeoutMs);
-        if (!existsSync(key))
-            throw new BuildError("build-failed", `The build finished but ${key} does not exist.`);
-        return key;
-    }
-    finally {
-        try {
-            unlinkSync(lock);
-        }
-        catch { }
-    }
-}
-function isLinked(source, target) {
-    try {
-        linkSync(source, target);
-        return true;
-    }
-    catch (error) {
-        if (error.code !== "EEXIST")
-            throw error;
-        return false;
-    }
-}
-async function acquire(lock, timeoutMs) {
-    const deadline = Date.now() + timeoutMs;
-    const claim = `${lock}.${process.pid}.${randomUUID()}`;
-    writeFileSync(claim, String(process.pid));
-    try {
-        for (;;) {
-            if (isLinked(claim, lock))
-                return;
-            const owner = lockOwner(lock);
-            if (owner !== undefined && !isAlive(owner)) {
-                const stale = `${lock}.stale.${randomUUID()}`;
-                try {
-                    renameSync(lock, stale);
-                }
-                catch {
-                    continue;
-                }
-                if (lockOwner(stale) !== owner)
-                    isLinked(stale, lock);
-                unlinkSync(stale);
-                continue;
-            }
-            if (Date.now() > deadline)
-                throw new BuildError("build-busy", `Another Pi session held the build lock ${lock} for longer than ${Math.round(timeoutMs / 1000)} seconds.`);
-            await sleep(250);
-        }
-    }
-    finally {
-        unlinkSync(claim);
-    }
-}
-function lockOwner(path) {
-    try {
-        const pid = Number(readFileSync(path, "utf8"));
-        return pid > 0 ? pid : undefined;
-    }
-    catch {
-        return undefined;
-    }
-}
-function isAlive(pid) {
-    try {
-        process.kill(pid, 0);
-        return true;
-    }
-    catch (error) {
-        return error.code !== "ESRCH";
-    }
+async function buildLocked(spec, key) {
+    const refusal = await refusalReason(spec);
+    if (refusal)
+        throw new BuildError("build-refused", `Refused to build ${spec.binary}: ${refusal}`);
+    mkdirSync(dirname(key), { recursive: true });
+    await run(spec, key, spec.timeoutMs ?? defaultTimeoutMs);
+    if (!existsSync(key))
+        throw new BuildError("build-failed", `The build finished but ${key} does not exist.`);
+    return key;
 }
 const gitVariables = ["PATH", "HOME"];
 function git(cwd, args) {
@@ -144,12 +84,16 @@ function git(cwd, args) {
         });
     });
 }
-function run(spec, timeoutMs) {
+const busyStatus = 75;
+function lockedCommand(spec, key, timeoutMs) {
+    const seconds = String(Math.max(1, Math.round(timeoutMs / 1000)));
+    const lock = process.platform === "darwin" ? ["/usr/bin/lockf", "-k", "-s", "-t", seconds, `${key}.lock`] : ["flock", "-w", seconds, "-E", String(busyStatus), `${key}.lock`];
+    return [...lock, "/bin/sh", "-c", 'test -e "$0" && exit 0; exec "$@"', key, ...spec.buildCommand];
+}
+function run(spec, key, timeoutMs) {
     const names = [...baseVariables, ...(spec.envAllowlist ?? [])];
     const env = Object.fromEntries(names.flatMap((name) => process.env[name] ? [[name, process.env[name]]] : []));
-    const [command, ...args] = spec.buildCommand;
-    if (!command)
-        return Promise.reject(new BuildError("build-failed", "The build command is empty."));
+    const [command = "", ...args] = lockedCommand(spec, key, timeoutMs);
     return new Promise((done, reject) => {
         const child = spawn(command, args, { cwd: spec.packageRoot, env, detached: true, stdio: ["ignore", "ignore", "pipe"] });
         let stderr = "";
@@ -163,12 +107,14 @@ function run(spec, timeoutMs) {
                     process.kill(-child.pid, "SIGKILL");
             }
             catch { }
-        }, timeoutMs);
+        }, 2 * timeoutMs);
         child.on("error", (error) => { clearTimeout(timer); reject(new BuildError("build-failed", `Could not start the build: ${error.message}`)); });
         child.on("close", (status) => {
             clearTimeout(timer);
             if (isTimedOut)
-                return reject(new BuildError("build-timeout", `The build timed out after ${Math.round(timeoutMs / 1000)} seconds.`));
+                return reject(new BuildError("build-timeout", `The build did not finish within ${Math.round((2 * timeoutMs) / 1000)} seconds, including the wait for the lock.`));
+            if (status === busyStatus)
+                return reject(new BuildError("build-busy", `Another Pi session held the build lock ${key}.lock for longer than ${Math.round(timeoutMs / 1000)} seconds.`));
             if (status !== 0)
                 return reject(new BuildError("build-failed", `The build failed: ${stderr.trim().split("\n").slice(-3).join(" ")}`));
             done();

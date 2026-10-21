@@ -50,6 +50,7 @@ export class BuildError extends Error {
 const baseVariables = ["PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "DEVELOPER_DIR"];
 const defaultTimeoutMs = 600_000;
 const inFlight = new Map<string, Promise<string>>();
+const progressListeners = new Map<string, Set<(progress: BuildProgress) => void>>();
 
 export function lockPath(spec: BuildSpec): string {
 	return `${resolve(spec.packageRoot, spec.binary)}.lock`;
@@ -99,13 +100,26 @@ export async function ensureBuilt(spec: BuildSpec, options: BuildOptions = {}): 
 	}
 	const key = resolve(spec.packageRoot, spec.binary);
 	const existing = inFlight.get(key);
-	if (existing) return existing;
+	if (existing) return follow(key, existing, options);
 	if (!(await isBuildNeeded(spec))) return key;
 	const running = inFlight.get(key);
-	if (running) return running;
-	const build = buildLocked(spec, key, options).finally(() => inFlight.delete(key));
+	if (running) return follow(key, running, options);
+	const listeners = new Set<(progress: BuildProgress) => void>();
+	progressListeners.set(key, listeners);
+	const build = buildLocked(spec, key, listeners).finally(() => {
+		inFlight.delete(key);
+		progressListeners.delete(key);
+	});
 	inFlight.set(key, build);
-	return build;
+	return follow(key, build, options);
+}
+
+function follow(key: string, build: Promise<string>, options: BuildOptions): Promise<string> {
+	const listener = options.onProgress;
+	const listeners = progressListeners.get(key);
+	if (!listener || !listeners) return build;
+	listeners.add(listener);
+	return build.finally(() => listeners.delete(listener));
 }
 
 function isInside(root: string, path: string): boolean {
@@ -160,11 +174,11 @@ export async function refusalReason(spec: BuildSpec): Promise<string> {
 	return links.length ? `the build inputs contain symbolic links:\n${links.map((line) => line.split("\t")[1]).join("\n")}\n` : "";
 }
 
-async function buildLocked(spec: BuildSpec, key: string, options: BuildOptions): Promise<string> {
+async function buildLocked(spec: BuildSpec, key: string, listeners: Set<(progress: BuildProgress) => void>): Promise<string> {
 	const refusal = await refusalReason(spec);
 	if (refusal) throw new BuildError("build-refused", `Refused to build ${spec.binary}: ${refusal}`);
 	mkdirSync(dirname(key), { recursive: true });
-	await run(spec, key, await inputsFingerprint(spec), spec.timeoutMs ?? defaultTimeoutMs, options);
+	await run(spec, key, await inputsFingerprint(spec), spec.timeoutMs ?? defaultTimeoutMs, listeners);
 	if (!existsSync(key)) throw new BuildError("build-failed", `The build finished but ${key} does not exist.`);
 	return key;
 }
@@ -198,16 +212,32 @@ function lockedCommand(spec: BuildSpec, key: string, fingerprint: string, timeou
 	return [...lock, "/bin/sh", "-c", wrapper, key, fingerprint, ...spec.buildCommand];
 }
 
-function lines(onLine: (line: string) => void): (chunk: string) => void {
+const lineLimit = 4000;
+const drainMs = 200;
+
+function lines(onLine: (line: string) => void): { add: (chunk: string) => void; flush: () => void } {
 	let pending = "";
-	return (chunk) => {
-		const parts = (pending + chunk).split(/\r?\n|\r/);
-		pending = parts.pop() ?? "";
-		for (const part of parts) if (part.trim()) onLine(part.trim());
+	return {
+		add: (chunk) => {
+			const parts = (pending + chunk).split(/\r?\n|\r/);
+			pending = (parts.pop() ?? "").slice(-lineLimit);
+			for (const part of parts) if (part.trim()) onLine(part.trim());
+		},
+		flush: () => {
+			if (pending.trim()) onLine(pending.trim());
+			pending = "";
+		},
 	};
 }
 
-function run(spec: BuildSpec, key: string, fingerprint: string, timeoutMs: number, options: BuildOptions): Promise<void> {
+function ended(stream: NodeJS.ReadableStream): Promise<void> {
+	return new Promise((done) => {
+		stream.once("end", done);
+		stream.once("close", done);
+	});
+}
+
+function run(spec: BuildSpec, key: string, fingerprint: string, timeoutMs: number, listeners: Set<(progress: BuildProgress) => void>): Promise<void> {
 	const names = [...baseVariables, ...(spec.envAllowlist ?? [])];
 	const env = Object.fromEntries(names.flatMap((name) => process.env[name] ? [[name, process.env[name]]] : []));
 	const [command = "", ...args] = lockedCommand(spec, key, fingerprint, timeoutMs);
@@ -217,10 +247,20 @@ function run(spec: BuildSpec, key: string, fingerprint: string, timeoutMs: numbe
 		let isTimedOut = false;
 		child.stderr.setEncoding("utf8");
 		child.stdout.setEncoding("utf8");
-		const report = (line: string) => { try { options.onProgress?.(progressOf(line)); } catch {} };
-		child.stdout.on("data", lines(report));
+		const report = (line: string) => {
+			const progress = progressOf(line);
+			for (const listener of listeners) {
+				try {
+					const result: unknown = listener(progress);
+					if (result instanceof Promise) result.catch(() => undefined);
+				} catch {}
+			}
+		};
+		const stdoutLines = lines(report);
 		const stderrLines = lines(report);
-		child.stderr.on("data", (chunk: string) => { stderr = (stderr + chunk).slice(-4000); stderrLines(chunk); });
+		const streamsEnded = Promise.all([ended(child.stdout), ended(child.stderr)]);
+		child.stdout.on("data", stdoutLines.add);
+		child.stderr.on("data", (chunk: string) => { stderr = (stderr + chunk).slice(-4000); stderrLines.add(chunk); });
 		const timer = setTimeout(() => {
 			isTimedOut = true;
 			try { if (child.pid) process.kill(-child.pid, "SIGKILL"); } catch {}
@@ -229,11 +269,14 @@ function run(spec: BuildSpec, key: string, fingerprint: string, timeoutMs: numbe
 			reject(new BuildError("build-timeout", `The build did not finish within ${Math.round((2 * timeoutMs) / 1000)} seconds, including the wait for the lock.`));
 		}, 2 * timeoutMs);
 		child.on("error", (error) => { clearTimeout(timer); reject(new BuildError("build-failed", `Could not start the build: ${error.message}`)); });
-		child.on("exit", (status) => {
-			child.stdout.destroy();
-			child.stderr.destroy();
+		child.on("exit", async (status) => {
 			clearTimeout(timer);
 			if (isTimedOut) return;
+			await Promise.race([streamsEnded, new Promise((done) => setTimeout(done, drainMs))]);
+			child.stdout.destroy();
+			child.stderr.destroy();
+			stdoutLines.flush();
+			stderrLines.flush();
 			if (status === busyStatus) return reject(new BuildError("build-busy", `Another Pi session held the build lock ${key}.lock for longer than ${lockSeconds(timeoutMs)} seconds.`));
 			if (status !== 0) return reject(new BuildError("build-failed", `The build failed: ${stderr.trim().split("\n").slice(-3).join(" ")}`));
 			done();

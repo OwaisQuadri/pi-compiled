@@ -56,8 +56,10 @@ The build command must start with an absolute path, so it does not depend on the
 `package.json` (replace `<owner>` with the GitHub account that hosts this repository):
 
 ```json
-"dependencies": { "pi-compiled": "github:<owner>/pi-compiled#v0.3.0" }
+"dependencies": { "pi-compiled": "github:<owner>/pi-compiled" }
 ```
+
+Consumers track `main` and do not pin a tag. Do not commit `package-lock.json`, because a lockfile pins the commit; add it to `.gitignore`. npm then installs the latest `main` each time Pi installs the consumer's dependencies. Pi does that on `pi install`, and on `pi update` only when the consumer's own commit changed. Changes to `main` must therefore stay compatible with existing consumers.
 
 `extension/index.ts`:
 

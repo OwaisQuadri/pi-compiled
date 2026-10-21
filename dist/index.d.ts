@@ -7,7 +7,7 @@ export interface BuildSpec {
     overrideEnv?: string;
     timeoutMs?: number;
 }
-export type BuildErrorCode = "build-refused" | "build-failed" | "build-timeout";
+export type BuildErrorCode = "build-refused" | "build-failed" | "build-timeout" | "build-busy";
 export declare class BuildError extends Error {
     readonly code: BuildErrorCode;
     constructor(code: BuildErrorCode, message: string);

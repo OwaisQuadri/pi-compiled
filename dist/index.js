@@ -1,8 +1,8 @@
 import { execFile, spawn } from "node:child_process";
-import { createHash } from "node:crypto";
-import { closeSync, existsSync, openSync, readFileSync, realpathSync, unlinkSync, writeSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { existsSync, linkSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 export class BuildError extends Error {
     code;
@@ -36,7 +36,14 @@ export function ensureBuilt(spec) {
     inFlight.set(key, build);
     return build;
 }
+function isInside(root, path) {
+    const relativePath = relative(root, resolve(root, path));
+    return relativePath !== "" && relativePath !== ".." && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath);
+}
 export async function refusalReason(spec) {
+    const outside = [spec.binary, ...spec.inputs].filter((path) => path.startsWith(":") || !isInside(spec.packageRoot, path));
+    if (outside.length)
+        return `these paths are not inside the package: ${outside.join(", ")}.`;
     const top = await git(spec.packageRoot, ["rev-parse", "--show-toplevel"]);
     if (realpathSync(top) !== realpathSync(spec.packageRoot))
         return `the package is not its own Git checkout (${top}).`;
@@ -66,52 +73,71 @@ async function buildLocked(spec, key, lock) {
         catch { }
     }
 }
-async function acquire(lock, timeoutMs) {
-    const deadline = Date.now() + timeoutMs;
-    for (;;) {
-        try {
-            const descriptor = openSync(lock, "wx");
-            writeSync(descriptor, String(process.pid));
-            closeSync(descriptor);
-            return;
-        }
-        catch (error) {
-            if (error.code !== "EEXIST")
-                throw error;
-        }
-        if (isStale(lock)) {
-            try {
-                unlinkSync(lock);
-            }
-            catch { }
-            continue;
-        }
-        if (Date.now() > deadline)
-            throw new BuildError("build-timeout", `Another process held the build lock ${lock} for too long.`);
-        await sleep(250);
-    }
-}
-function isStale(lock) {
-    let pid;
+function isLinked(source, target) {
     try {
-        pid = Number(readFileSync(lock, "utf8"));
-    }
-    catch {
-        return false;
-    }
-    if (!pid)
-        return false;
-    try {
-        process.kill(pid, 0);
-        return false;
+        linkSync(source, target);
+        return true;
     }
     catch (error) {
-        return error.code === "ESRCH";
+        if (error.code !== "EEXIST")
+            throw error;
+        return false;
     }
 }
+async function acquire(lock, timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    const claim = `${lock}.${process.pid}.${randomUUID()}`;
+    writeFileSync(claim, String(process.pid));
+    try {
+        for (;;) {
+            if (isLinked(claim, lock))
+                return;
+            const owner = lockOwner(lock);
+            if (owner !== undefined && !isAlive(owner)) {
+                const stale = `${lock}.stale.${randomUUID()}`;
+                try {
+                    renameSync(lock, stale);
+                }
+                catch {
+                    continue;
+                }
+                if (lockOwner(stale) !== owner)
+                    isLinked(stale, lock);
+                unlinkSync(stale);
+                continue;
+            }
+            if (Date.now() > deadline)
+                throw new BuildError("build-busy", `Another Pi session held the build lock ${lock} for longer than ${Math.round(timeoutMs / 1000)} seconds.`);
+            await sleep(250);
+        }
+    }
+    finally {
+        unlinkSync(claim);
+    }
+}
+function lockOwner(path) {
+    try {
+        const pid = Number(readFileSync(path, "utf8"));
+        return pid > 0 ? pid : undefined;
+    }
+    catch {
+        return undefined;
+    }
+}
+function isAlive(pid) {
+    try {
+        process.kill(pid, 0);
+        return true;
+    }
+    catch (error) {
+        return error.code !== "ESRCH";
+    }
+}
+const gitVariables = ["PATH", "HOME"];
 function git(cwd, args) {
+    const env = Object.fromEntries(gitVariables.flatMap((name) => process.env[name] ? [[name, process.env[name]]] : []));
     return new Promise((done, reject) => {
-        execFile("git", ["-C", cwd, ...args], (error, stdout, stderr) => {
+        execFile("git", ["--no-optional-locks", "-c", "core.fsmonitor=false", "-C", cwd, ...args], { env }, (error, stdout, stderr) => {
             if (error)
                 return reject(new BuildError("build-refused", `Could not check the package with Git (${(stderr.trim() || error.message).split("\n")[0]}).`));
             done(stdout.trimEnd());

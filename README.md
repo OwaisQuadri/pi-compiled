@@ -2,7 +2,7 @@
 
 Builds a Pi extension's compiled tool (Swift, Rust, anything with a build command) the first time it is needed, instead of a manual setup script.
 
-It refuses to build unless the package is its own Git checkout and every build input is committed, with no untracked or ignored files. An agent therefore cannot get modified code built and signed.
+It refuses to build unless the package is its own Git checkout and every build input is committed, with no untracked or ignored files. Inputs and the binary must be inside the package. Git runs with only `PATH` and `HOME` and with the file system monitor off, so the caller's Git variables cannot fake a clean result. This stops uncommitted code from being built and signed. It does not stop code that someone committed to the clone.
 
 ## API
 
@@ -23,10 +23,10 @@ interface BuildSpec {
   timeoutMs?: number;       // default 600000
 }
 
-class BuildError extends Error { code: "build-refused" | "build-failed" | "build-timeout" }
+class BuildError extends Error { code: "build-refused" | "build-failed" | "build-timeout" | "build-busy" }
 ```
 
-`lockPath` returns the lock file for a spec. `ensureBuilt` returns the absolute binary path. The build runs in its own process group with only allowlisted variables. On timeout the whole group is killed. Concurrent calls in one process share one build, and a lock file in the temp directory serializes builds across Pi sessions. The binary must exist after the build.
+`lockPath` returns the lock file for a spec. `ensureBuilt` returns the absolute binary path. The build runs in its own process group with only allowlisted variables. On timeout the whole group is killed (`build-timeout`). Concurrent calls in one process share one build, and a lock file in the temp directory serializes builds across Pi sessions. A session waits for another session's lock for up to `timeoutMs`, then fails with `build-busy`; a lock whose owner process died is taken over. The binary must exist after the build.
 
 `refusalReason` returns an empty string when a build is allowed. Use it with `isBuildNeeded` to ask the user before building.
 

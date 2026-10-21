@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -22,6 +22,24 @@ test("refuses to build when an input has uncommitted changes, so modified code i
 	const root = checkout();
 	writeFileSync(join(root, "source.txt"), "tampered\n");
 	await assert.rejects(ensureBuilt(spec(root, "mkdir -p bin && touch bin/tool")), (error: BuildError) => error.code === "build-refused");
+});
+
+test("refuses ignored files and paths outside the package, so nothing unreviewed reaches the build", async () => {
+	const root = checkout();
+	const build = { ...spec(root, "mkdir -p bin && touch bin/tool"), inputs: ["source.txt", "bin"] };
+	mkdirSync(join(root, "bin"));
+	writeFileSync(join(root, "bin/extra"), "x");
+	await assert.rejects(ensureBuilt(build), (error: BuildError) => error.code === "build-refused" && /ignored/.test(error.message));
+	for (const inputs of [["../outside"], [":(top)source.txt"]]) {
+		await assert.rejects(ensureBuilt({ ...spec(root, "true"), inputs }), (error: BuildError) => error.code === "build-refused" && /not inside/.test(error.message));
+	}
+});
+
+test("an override binary skips the build, so a prebuilt tool is used as is", async () => {
+	const root = checkout();
+	process.env.PI_BUILD_ON_USE_TEST_TOOL = "/usr/bin/true";
+	assert.equal(await ensureBuilt({ ...spec(root, "exit 1"), overrideEnv: "PI_BUILD_ON_USE_TEST_TOOL" }), "/usr/bin/true");
+	delete process.env.PI_BUILD_ON_USE_TEST_TOOL;
 });
 
 test("kills the whole process group on timeout, so a hung build leaves no orphans", async () => {

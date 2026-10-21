@@ -34,6 +34,7 @@ test("refuses ignored files and paths outside the package, so nothing unreviewed
 		await assert.rejects(ensureBuilt({ ...spec(root, "true"), inputs }), (error: BuildError) => error.code === "build-refused" && /not inside/.test(error.message));
 	}
 	await assert.rejects(ensureBuilt({ ...spec(root, "true"), buildCommand: ["make"] }), (error: BuildError) => error.code === "build-refused" && /absolute/.test(error.message));
+	await assert.rejects(ensureBuilt({ ...spec(root, "true"), inputs: ["sourcee.txt"] }), (error: BuildError) => error.code === "build-refused");
 	symlinkSync(tmpdir(), join(root, "outside"));
 	await assert.rejects(ensureBuilt({ ...spec(root, "true"), inputs: ["outside"] }), (error: BuildError) => error.code === "build-refused" && /symbolic link/.test(error.message));
 	symlinkSync("source.txt", join(root, "alias"));

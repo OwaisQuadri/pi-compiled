@@ -81,7 +81,7 @@ export async function refusalReason(spec) {
     const changes = await git(spec.packageRoot, ["status", "--porcelain", "--ignored", "--untracked-files=all", "--", ...spec.inputs]);
     if (changes)
         return `the build inputs have uncommitted or ignored changes:\n${changes}\n`;
-    const links = (await git(spec.packageRoot, ["ls-files", "-s", "--", ...spec.inputs])).split("\n").filter((line) => line.startsWith("120000 "));
+    const links = (await git(spec.packageRoot, ["ls-files", "-s", "--error-unmatch", "--", ...spec.inputs])).split("\n").filter((line) => line.startsWith("120000 "));
     return links.length ? `the build inputs contain symbolic links:\n${links.map((line) => line.split("\t")[1]).join("\n")}\n` : "";
 }
 async function buildLocked(spec, key) {
@@ -95,10 +95,14 @@ async function buildLocked(spec, key) {
     return key;
 }
 const gitVariables = ["PATH", "HOME"];
+const gitPaths = ["/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git"];
 function git(cwd, args) {
     const env = Object.fromEntries(gitVariables.flatMap((name) => process.env[name] ? [[name, process.env[name]]] : []));
     return new Promise((done, reject) => {
-        execFile("git", ["--no-optional-locks", "-c", "core.fsmonitor=false", "-C", cwd, ...args], { env }, (error, stdout, stderr) => {
+        const command = gitPaths.find((path) => existsSync(path));
+        if (!command)
+            return reject(new BuildError("build-refused", `No Git was found at ${gitPaths.join(", ")}.`));
+        execFile(command, ["--no-optional-locks", "-c", "core.fsmonitor=false", "-C", cwd, ...args], { env }, (error, stdout, stderr) => {
             if (error)
                 return reject(new BuildError("build-refused", `Could not check the package with Git (${(stderr.trim() || error.message).split("\n")[0]}).`));
             done(stdout.trimEnd());

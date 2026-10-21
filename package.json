@@ -1,6 +1,6 @@
 {
   "name": "pi-compiled",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Build a Pi package's compiled tool after install and update, only from a clean Git checkout.",
   "type": "module",
   "license": "MIT",

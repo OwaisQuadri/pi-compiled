@@ -100,6 +100,8 @@ export async function refusalReason(spec: BuildSpec): Promise<string> {
 	} catch (error) {
 		return `a build input does not match a committed file: ${(error as Error).message}`;
 	}
+	const hidden = (await git(spec.packageRoot, ["ls-files", "-v", "--", ...spec.inputs])).split("\n").filter((line) => /^[a-zS] /.test(line));
+	if (hidden.length) return `the build inputs are marked assume-unchanged or skip-worktree, so Git cannot see changes to them:\n${hidden.map((line) => line.slice(2)).join("\n")}\n`;
 	const links = listing.split("\n").filter((line) => line.startsWith("120000 "));
 	return links.length ? `the build inputs contain symbolic links:\n${links.map((line) => line.split("\t")[1]).join("\n")}\n` : "";
 }
@@ -121,7 +123,7 @@ function git(cwd: string, args: string[]): Promise<string> {
 	return new Promise((done, reject) => {
 		const command = gitPaths.find((path) => existsSync(path));
 		if (!command) return reject(new BuildError("build-refused", `No Git was found at ${gitPaths.join(", ")}.`));
-		execFile(command, ["--no-optional-locks", "-c", "core.fsmonitor=false", "-C", cwd, ...args], { env }, (error, stdout, stderr) => {
+		execFile(command, ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.ignoreStat=false", "-C", cwd, ...args], { env }, (error, stdout, stderr) => {
 			if (error) return reject(new BuildError("build-refused", `Could not check the package with Git (${(stderr.trim() || error.message).split("\n")[0]}).`));
 			done(stdout.trimEnd());
 		});

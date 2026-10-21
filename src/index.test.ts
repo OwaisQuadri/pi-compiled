@@ -22,6 +22,11 @@ test("refuses to build when an input has uncommitted changes, so modified code i
 	const root = checkout();
 	writeFileSync(join(root, "source.txt"), "tampered\n");
 	await assert.rejects(ensureBuilt(spec(root, "mkdir -p bin && touch bin/tool")), (error: BuildError) => error.code === "build-refused");
+	for (const flag of ["--assume-unchanged", "--skip-worktree"]) {
+		execFileSync("git", ["-C", root, "update-index", flag, "source.txt"]);
+		await assert.rejects(ensureBuilt(spec(root, "mkdir -p bin && touch bin/tool")), (error: BuildError) => error.code === "build-refused" && /assume-unchanged or skip-worktree/.test(error.message));
+		execFileSync("git", ["-C", root, "update-index", flag.replace("--", "--no-"), "source.txt"]);
+	}
 });
 
 test("refuses ignored files and paths outside the package, so nothing unreviewed reaches the build", async () => {

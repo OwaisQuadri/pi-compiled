@@ -11,6 +11,7 @@ export interface BuildSpec {
 	envAllowlist?: string[];
 	overrideEnv?: string;
 	timeoutMs?: number;
+	isUpstreamRequired?: boolean;
 }
 
 export type BuildErrorCode = "build-refused" | "build-failed" | "build-timeout" | "build-busy";
@@ -57,7 +58,7 @@ export async function isBuildNeeded(spec: BuildSpec): Promise<boolean> {
 	try {
 		fingerprint = await inputsFingerprint(spec);
 	} catch {
-		return false;
+		return true;
 	}
 	let stamp = "";
 	try { stamp = readFileSync(stampPath(spec), "utf8"); } catch {}
@@ -113,6 +114,16 @@ export async function refusalReason(spec: BuildSpec): Promise<string> {
 	if (!lockTool()) return `no flock was found at ${flockPaths.join(" or ")}.`;
 	const top = await git(spec.packageRoot, ["rev-parse", "--show-toplevel"]);
 	if (realpathSync(top) !== realpathSync(spec.packageRoot)) return `the package is not its own Git checkout (${top}).`;
+	if (spec.isUpstreamRequired) {
+		let upstream: string;
+		try {
+			upstream = await git(spec.packageRoot, ["rev-parse", "--verify", "@{upstream}^{commit}"]);
+		} catch {
+			return "the checkout has no upstream branch, and this package builds only the fetched upstream commit.";
+		}
+		const head = await git(spec.packageRoot, ["rev-parse", "--verify", "HEAD^{commit}"]);
+		if (head !== upstream) return `HEAD ${head.slice(0, 12)} is not the fetched upstream commit ${upstream.slice(0, 12)}, and this package builds only the fetched upstream commit.`;
+	}
 	if (!spec.inputs.length) return "no build inputs were declared.";
 	const changes = await git(spec.packageRoot, ["status", "--porcelain", "--ignored", "--untracked-files=all", "--", ...spec.inputs]);
 	if (changes) return `the build inputs have uncommitted or ignored changes:\n${changes}\n`;

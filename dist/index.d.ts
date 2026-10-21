@@ -6,6 +6,7 @@ export interface BuildSpec {
     envAllowlist?: string[];
     overrideEnv?: string;
     timeoutMs?: number;
+    isUpstreamRequired?: boolean;
 }
 export type BuildErrorCode = "build-refused" | "build-failed" | "build-timeout" | "build-busy";
 export declare class BuildError extends Error {

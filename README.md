@@ -15,7 +15,9 @@ Pi runs `npm install` in a git package after install and update, but this does n
 
 ## Safety
 
-It refuses to build unless the package is its own Git checkout and every build input is committed, with no untracked or ignored files. Inputs and the binary must be inside the package, also after symbolic links are resolved, and inputs must not contain committed symbolic links. Each input must match a committed file, so a misspelled input is refused. Git runs from `/usr/bin`, `/opt/homebrew/bin`, or `/usr/local/bin` with only `PATH` and `HOME`, and with the file system monitor and `core.ignoreStat` off, so the caller's Git settings cannot fake a clean result. Inputs marked assume-unchanged or skip-worktree, including by sparse checkout, are refused. This stops uncommitted code from being built and signed. It does not stop code that someone committed to the clone. Inputs are checked once before the build starts, not while it runs.
+It refuses to build unless the package is its own Git checkout and every build input is committed, with no untracked or ignored files. Inputs and the binary must be inside the package, also after symbolic links are resolved, and inputs must not contain committed symbolic links. Each input must match a committed file, so a misspelled input is refused. Git runs from `/usr/bin`, `/opt/homebrew/bin`, or `/usr/local/bin` with only `PATH` and `HOME`, and with the file system monitor and `core.ignoreStat` off, so the caller's Git settings cannot fake a clean result. Inputs marked assume-unchanged or skip-worktree, including by sparse checkout, are refused. This stops uncommitted code from being built and signed. Code committed in the clone is built unless you set `isUpstreamRequired`, which also requires `HEAD` to be the fetched upstream commit (`@{upstream}`). A clone made by `pi install` tracks its remote branch, so it passes. A local commit there, or a checkout with no upstream branch, is refused. That check stops a stray local commit. It does not stop someone who can also rewrite the remote-tracking ref. Inputs are checked once before the build starts, not while it runs. When Git cannot check the package, `isBuildNeeded` returns true, so `ensureBuilt` reports the refusal instead of skipping silently.
+
+The checks cover the declared inputs only. A build script that reuses an ignored build cache, such as a SwiftPM scratch directory, can link files that no check saw. Build into a fresh scratch directory, or delete the cache before each build.
 
 ## API
 
@@ -35,6 +37,7 @@ interface BuildSpec {
   envAllowlist?: string[];  // added to PATH HOME USER LOGNAME TMPDIR DEVELOPER_DIR
   overrideEnv?: string;     // env var naming a prebuilt binary; skips the build
   timeoutMs?: number;       // default 600000
+  isUpstreamRequired?: boolean; // build only when HEAD is the fetched upstream commit
 }
 
 class BuildError extends Error { code: "build-refused" | "build-failed" | "build-timeout" | "build-busy" }
@@ -51,7 +54,7 @@ The build command must start with an absolute path, so it does not depend on the
 `package.json` (replace `<owner>` with the GitHub account that hosts this repository):
 
 ```json
-"dependencies": { "pi-compiled": "github:<owner>/pi-compiled#v0.1.0" }
+"dependencies": { "pi-compiled": "github:<owner>/pi-compiled#v0.2.0" }
 ```
 
 `extension/index.ts`:

@@ -48,6 +48,26 @@ test("refuses ignored files and paths outside the package, so nothing unreviewed
 	await assert.rejects(ensureBuilt({ ...spec(root, "true"), inputs: ["alias"] }), (error: BuildError) => error.code === "build-refused" && /symbolic links/.test(error.message));
 });
 
+test("with isUpstreamRequired, builds only the fetched upstream commit, so a commit made in the installed clone is never built", async () => {
+	const remote = checkout();
+	const root = mkdtempSync(join(tmpdir(), "pi-compiled-clone-"));
+	execFileSync("git", ["clone", "-q", remote, root]);
+	const build = { ...spec(root, "mkdir -p bin && touch bin/tool"), isUpstreamRequired: true };
+	writeFileSync(join(root, "source.txt"), "local\n");
+	execFileSync("git", ["-C", root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "local"]);
+	await assert.rejects(ensureBuilt(build), (error: BuildError) => error.code === "build-refused" && /not the fetched upstream commit/.test(error.message));
+	execFileSync("git", ["-C", root, "reset", "-q", "--hard", "@{upstream}"]);
+	assert.equal(await ensureBuilt(build), join(root, "bin/tool"));
+	await assert.rejects(ensureBuilt({ ...spec(remote, "true"), isUpstreamRequired: true }), (error: BuildError) => error.code === "build-refused" && /no upstream branch/.test(error.message));
+});
+
+test("a package that Git cannot check still reports that it needs a build, so the refusal reaches the user", async () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-compiled-plain-"));
+	mkdirSync(join(root, "bin"));
+	writeFileSync(join(root, "bin/tool"), "");
+	assert.equal(await isBuildNeeded(spec(root, "true")), true);
+});
+
 test("a build that exits 75 is a failure, not a busy lock, so a broken build is never retried as busy", async () => {
 	await assert.rejects(ensureBuilt(spec(checkout(), "exit 75")), (error: BuildError) => error.code === "build-failed");
 });

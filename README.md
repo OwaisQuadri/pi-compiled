@@ -2,7 +2,7 @@
 
 Builds a Pi extension's compiled tool (Swift, Rust, anything with a build command) the first time it is needed, instead of a manual setup script.
 
-It refuses to build unless the package is its own Git checkout and every build input is committed, with no untracked or ignored files. Inputs and the binary must be inside the package, also after symbolic links are resolved, and inputs must not contain committed symbolic links. Each input must match a committed file, so a misspelled input is refused. Git runs from `/usr/bin`, `/opt/homebrew/bin`, or `/usr/local/bin` with only `PATH` and `HOME` and with the file system monitor off, so the caller's Git variables cannot fake a clean result. This stops uncommitted code from being built and signed. It does not stop code that someone committed to the clone.
+It refuses to build unless the package is its own Git checkout and every build input is committed, with no untracked or ignored files. Inputs and the binary must be inside the package, also after symbolic links are resolved, and inputs must not contain committed symbolic links. Each input must match a committed file, so a misspelled input is refused. Git runs from `/usr/bin`, `/opt/homebrew/bin`, or `/usr/local/bin` with only `PATH` and `HOME` and with the file system monitor off, so the caller's Git variables cannot fake a clean result. This stops uncommitted code from being built and signed. It does not stop code that someone committed to the clone. Inputs are checked once before the build starts, not while it runs.
 
 ## API
 

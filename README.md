@@ -2,7 +2,7 @@
 
 Builds a Pi extension's compiled tool (Swift, Rust, anything with a build command) the first time it is needed, instead of a manual setup script.
 
-It refuses to build unless the package is its own Git checkout and every build input is committed, with no untracked or ignored files. Inputs and the binary must be inside the package. Git runs with only `PATH` and `HOME` and with the file system monitor off, so the caller's Git variables cannot fake a clean result. This stops uncommitted code from being built and signed. It does not stop code that someone committed to the clone.
+It refuses to build unless the package is its own Git checkout and every build input is committed, with no untracked or ignored files. Inputs and the binary must be inside the package, also after symbolic links are resolved, and inputs must not contain committed symbolic links. Git runs with only `PATH` and `HOME` and with the file system monitor off, so the caller's Git variables cannot fake a clean result. This stops uncommitted code from being built and signed. It does not stop code that someone committed to the clone.
 
 ## API
 
@@ -26,9 +26,9 @@ interface BuildSpec {
 class BuildError extends Error { code: "build-refused" | "build-failed" | "build-timeout" | "build-busy" }
 ```
 
-`lockPath` returns the lock file for a spec. `ensureBuilt` returns the absolute binary path. The build runs in its own process group with only allowlisted variables. Concurrent calls in one process share one build. Across Pi sessions, a kernel file lock on `<binary>.lock` serializes builds (`/usr/bin/lockf` on macOS, `flock` on Linux). The kernel releases it when the holder dies. A session waits up to `timeoutMs` for the lock, then fails with `build-busy`. After it gets the lock, it skips the build when another session already made the binary. When the lock wait and the build together pass twice `timeoutMs`, the whole group is killed (`build-timeout`). The binary must exist after the build.
+`lockPath` returns the lock file for a spec. `ensureBuilt` returns the absolute binary path. The build runs in its own process group with only allowlisted variables. Concurrent calls in one process share one build. Across Pi sessions, a kernel file lock on `<binary>.lock` serializes builds (`/usr/bin/lockf` on macOS, `/usr/bin/flock` or `/bin/flock` on Linux; without one the build is refused). The kernel releases it when the holder dies. A session waits up to `timeoutMs` for the lock, then fails with `build-busy`. After it gets the lock, it skips the build when another session already made the binary. When the lock wait and the build together pass twice `timeoutMs`, the whole group is killed (`build-timeout`). The binary must exist after the build.
 
-The build command must start with an absolute path, so it does not depend on the caller's `PATH`. An override binary must be executable. Build scripts must write the binary to a temporary file and rename it into place: a session that finds the binary without taking the lock uses it at once.
+The build command must start with an absolute path, so it does not depend on the caller's `PATH`. A build that exits with status 75 is reported as `build-failed`, not `build-busy`. An override binary must be an absolute path to an executable file. Build scripts must write the binary to a temporary file and rename it into place: a session that finds the binary without taking the lock uses it at once.
 
 `refusalReason` returns an empty string when a build is allowed. Use it with `isBuildNeeded` to ask the user before building.
 

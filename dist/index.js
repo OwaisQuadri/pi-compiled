@@ -28,10 +28,12 @@ export function ensureBuilt(spec) {
     const prebuilt = override(spec);
     if (prebuilt !== undefined) {
         try {
+            if (!isAbsolute(prebuilt))
+                throw new Error("relative");
             accessSync(prebuilt, constants.X_OK);
         }
         catch {
-            return Promise.reject(new BuildError("build-failed", `${spec.overrideEnv} names ${prebuilt}, which is not an executable file.`));
+            return Promise.reject(new BuildError("build-failed", `${spec.overrideEnv} names ${prebuilt}, which is not an absolute path to an executable file.`));
         }
         return Promise.resolve(prebuilt);
     }
@@ -49,19 +51,38 @@ function isInside(root, path) {
     const relativePath = relative(root, resolve(root, path));
     return relativePath !== "" && relativePath !== ".." && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath);
 }
+function realPath(path) {
+    let existing = path;
+    while (!existsSync(existing) && dirname(existing) !== existing)
+        existing = dirname(existing);
+    return resolve(realpathSync(existing), relative(existing, path));
+}
+const flockPaths = ["/usr/bin/flock", "/bin/flock"];
+function lockTool() {
+    return process.platform === "darwin" ? "/usr/bin/lockf" : flockPaths.find((path) => existsSync(path));
+}
 export async function refusalReason(spec) {
     if (!isAbsolute(spec.buildCommand[0] ?? ""))
         return "the build command must start with an absolute path.";
     const outside = [spec.binary, ...spec.inputs].filter((path) => path.startsWith(":") || !isInside(spec.packageRoot, path));
     if (outside.length)
         return `these paths are not inside the package: ${outside.join(", ")}.`;
+    const root = realpathSync(spec.packageRoot);
+    const escaping = [spec.binary, ...spec.inputs].filter((path) => !isInside(root, realPath(resolve(spec.packageRoot, path))));
+    if (escaping.length)
+        return `these paths resolve outside the package through a symbolic link: ${escaping.join(", ")}.`;
+    if (!lockTool())
+        return `no flock was found at ${flockPaths.join(" or ")}.`;
     const top = await git(spec.packageRoot, ["rev-parse", "--show-toplevel"]);
     if (realpathSync(top) !== realpathSync(spec.packageRoot))
         return `the package is not its own Git checkout (${top}).`;
     if (!spec.inputs.length)
         return "no build inputs were declared.";
     const changes = await git(spec.packageRoot, ["status", "--porcelain", "--ignored", "--untracked-files=all", "--", ...spec.inputs]);
-    return changes ? `the build inputs have uncommitted or ignored changes:\n${changes}\n` : "";
+    if (changes)
+        return `the build inputs have uncommitted or ignored changes:\n${changes}\n`;
+    const links = (await git(spec.packageRoot, ["ls-files", "-s", "--", ...spec.inputs])).split("\n").filter((line) => line.startsWith("120000 "));
+    return links.length ? `the build inputs contain symbolic links:\n${links.map((line) => line.split("\t")[1]).join("\n")}\n` : "";
 }
 async function buildLocked(spec, key) {
     const refusal = await refusalReason(spec);
@@ -85,10 +106,14 @@ function git(cwd, args) {
     });
 }
 const busyStatus = 75;
+function lockSeconds(timeoutMs) {
+    return Math.max(1, Math.round(timeoutMs / 1000));
+}
 function lockedCommand(spec, key, timeoutMs) {
-    const seconds = String(Math.max(1, Math.round(timeoutMs / 1000)));
-    const lock = process.platform === "darwin" ? ["/usr/bin/lockf", "-k", "-s", "-t", seconds, `${key}.lock`] : ["flock", "-w", seconds, "-E", String(busyStatus), `${key}.lock`];
-    return [...lock, "/bin/sh", "-c", 'test -e "$0" && exit 0; exec "$@"', key, ...spec.buildCommand];
+    const seconds = String(lockSeconds(timeoutMs));
+    const tool = lockTool() ?? "";
+    const lock = process.platform === "darwin" ? [tool, "-k", "-s", "-t", seconds, `${key}.lock`] : [tool, "-w", seconds, "-E", String(busyStatus), `${key}.lock`];
+    return [...lock, "/bin/sh", "-c", `test -e "$0" && exit 0; "$@"; status=$?; [ "$status" = ${busyStatus} ] && exit ${busyStatus + 1}; exit "$status"`, key, ...spec.buildCommand];
 }
 function run(spec, key, timeoutMs) {
     const names = [...baseVariables, ...(spec.envAllowlist ?? [])];
@@ -107,14 +132,16 @@ function run(spec, key, timeoutMs) {
                     process.kill(-child.pid, "SIGKILL");
             }
             catch { }
+            child.stderr.destroy();
+            reject(new BuildError("build-timeout", `The build did not finish within ${Math.round((2 * timeoutMs) / 1000)} seconds, including the wait for the lock.`));
         }, 2 * timeoutMs);
         child.on("error", (error) => { clearTimeout(timer); reject(new BuildError("build-failed", `Could not start the build: ${error.message}`)); });
         child.on("close", (status) => {
             clearTimeout(timer);
             if (isTimedOut)
-                return reject(new BuildError("build-timeout", `The build did not finish within ${Math.round((2 * timeoutMs) / 1000)} seconds, including the wait for the lock.`));
+                return;
             if (status === busyStatus)
-                return reject(new BuildError("build-busy", `Another Pi session held the build lock ${key}.lock for longer than ${Math.round(timeoutMs / 1000)} seconds.`));
+                return reject(new BuildError("build-busy", `Another Pi session held the build lock ${key}.lock for longer than ${lockSeconds(timeoutMs)} seconds.`));
             if (status !== 0)
                 return reject(new BuildError("build-failed", `The build failed: ${stderr.trim().split("\n").slice(-3).join(" ")}`));
             done();

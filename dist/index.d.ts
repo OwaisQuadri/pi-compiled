@@ -14,6 +14,7 @@ export declare class BuildError extends Error {
 }
 export declare function lockPath(spec: BuildSpec): string;
 export declare function binaryPath(spec: BuildSpec): string;
-export declare function isBuildNeeded(spec: BuildSpec): boolean;
+export declare function stampPath(spec: BuildSpec): string;
+export declare function isBuildNeeded(spec: BuildSpec): Promise<boolean>;
 export declare function ensureBuilt(spec: BuildSpec): Promise<string>;
 export declare function refusalReason(spec: BuildSpec): Promise<string>;

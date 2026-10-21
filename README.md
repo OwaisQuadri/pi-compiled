@@ -1,6 +1,18 @@
-# pi-build-on-use
+# pi-compiled
 
-Builds a Pi extension's compiled tool (Swift, Rust, anything with a build command) the first time it is needed, instead of a manual setup script.
+Adds a compile step to Pi packages. Pi loads TypeScript as is. A package that also ships a compiled tool (Swift, Rust, anything with a build command) uses `pi-compiled` to build that tool after `pi install` and `pi update`, without a manual setup script.
+
+## When it builds
+
+Call `ensureBuilt` when the extension loads (`session_start`). It builds when the binary is missing, or when the committed build inputs changed since the binary was built. After each build it writes `<binary>.stamp`, a hash of the build command and the committed inputs.
+
+- `pi install` clones the package, so the next load builds the tool.
+- `pi update` moves the clone to a new commit but keeps ignored files, including the old binary. The stamp no longer matches, so the next load rebuilds it.
+- A load with no changes costs one `git ls-files` call.
+
+Pi runs `npm install` in a git package after install and update, but this does not use an npm `postinstall` script. Many machines set `ignore-scripts`, and a build that fails in `postinstall` makes `pi install` delete the clone.
+
+## Safety
 
 It refuses to build unless the package is its own Git checkout and every build input is committed, with no untracked or ignored files. Inputs and the binary must be inside the package, also after symbolic links are resolved, and inputs must not contain committed symbolic links. Each input must match a committed file, so a misspelled input is refused. Git runs from `/usr/bin`, `/opt/homebrew/bin`, or `/usr/local/bin` with only `PATH` and `HOME`, and with the file system monitor and `core.ignoreStat` off, so the caller's Git settings cannot fake a clean result. Inputs marked assume-unchanged or skip-worktree, including by sparse checkout, are refused. This stops uncommitted code from being built and signed. It does not stop code that someone committed to the clone. Inputs are checked once before the build starts, not while it runs.
 
@@ -8,9 +20,10 @@ It refuses to build unless the package is its own Git checkout and every build i
 
 ```ts
 ensureBuilt(spec: BuildSpec): Promise<string>
-isBuildNeeded(spec: BuildSpec): boolean
+isBuildNeeded(spec: BuildSpec): Promise<boolean>
 binaryPath(spec: BuildSpec): string
 lockPath(spec: BuildSpec): string
+stampPath(spec: BuildSpec): string
 refusalReason(spec: BuildSpec): Promise<string>
 
 interface BuildSpec {
@@ -26,25 +39,25 @@ interface BuildSpec {
 class BuildError extends Error { code: "build-refused" | "build-failed" | "build-timeout" | "build-busy" }
 ```
 
-`lockPath` returns the lock file for a spec. `ensureBuilt` returns the absolute binary path. The build runs in its own process group with only allowlisted variables. Concurrent calls in one process share one build. Across Pi sessions, a kernel file lock on `<binary>.lock` serializes builds (`/usr/bin/lockf` on macOS, util-linux `flock` 2.26 or later at `/usr/bin/flock` or `/bin/flock` on Linux; without one the build is refused, and BusyBox `flock` is not supported). The kernel releases it when the holder dies. A session waits up to `timeoutMs` for the lock, then fails with `build-busy`. After it gets the lock, it skips the build when another session already made the binary. When the lock wait and the build together pass twice `timeoutMs`, the whole group is killed (`build-timeout`). The binary must exist after the build.
+`ensureBuilt` returns the absolute binary path. The build runs in its own process group with only allowlisted variables. Concurrent calls in one process share one build. Across Pi sessions, a kernel file lock on `<binary>.lock` serializes builds (`/usr/bin/lockf` on macOS, util-linux `flock` 2.26 or later at `/usr/bin/flock` or `/bin/flock` on Linux; without one the build is refused, and BusyBox `flock` is not supported). The kernel releases it when the holder dies. A session waits up to `timeoutMs` for the lock, then fails with `build-busy`. After it gets the lock, it skips the build when another session already built the binary from the same inputs. When the lock wait and the build together pass twice `timeoutMs`, the whole group is killed (`build-timeout`). The binary must exist after the build.
 
 The build command must start with an absolute path, so it does not depend on the caller's `PATH`. A build that exits with status 75 is reported as `build-failed`, not `build-busy`. An override binary must be an absolute path to an executable file. Build scripts must write the binary to a temporary file and rename it into place: a session that finds the binary without taking the lock uses it at once.
 
-`refusalReason` returns an empty string when a build is allowed. Use it with `isBuildNeeded` to ask the user before building.
+`isBuildNeeded` returns `false` for an existing binary when Git cannot read the package. `refusalReason` returns an empty string when a build is allowed. Use the two together to ask the user before building.
 
 ## Consumer
 
 `package.json` (replace `<owner>` with the GitHub account that hosts this repository):
 
 ```json
-"dependencies": { "pi-build-on-use": "github:<owner>/pi-build-on-use#v0.1.0" }
+"dependencies": { "pi-compiled": "github:<owner>/pi-compiled#v0.1.0" }
 ```
 
 `extension/index.ts`:
 
 ```ts
 import { fileURLToPath } from "node:url";
-import { ensureBuilt } from "pi-build-on-use";
+import { ensureBuilt } from "pi-compiled";
 
 const helper = {
   packageRoot: fileURLToPath(new URL("..", import.meta.url)),
@@ -61,7 +74,7 @@ pi.on("session_start", async (_event, ctx) => {
 });
 ```
 
-List specific paths in `inputs`, never `.`. Pi installs this package into the consumer's ignored `node_modules`, so `.` always refuses the build. Keep the binary's output directory, which also holds `<binary>.lock`, out of `inputs`, and list it in `.gitignore`.
+List specific paths in `inputs`, never `.`. Pi installs this package into the consumer's ignored `node_modules`, so `.` always refuses the build. Keep the binary's output directory, which also holds `<binary>.lock` and `<binary>.stamp`, out of `inputs`, and list it in `.gitignore`.
 
 ## Development
 

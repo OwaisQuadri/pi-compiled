@@ -4,10 +4,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { BuildError, ensureBuilt, lockPath, type BuildSpec } from "./index.ts";
+import { BuildError, ensureBuilt, isBuildNeeded, lockPath, type BuildSpec } from "./index.ts";
 
 function checkout(): string {
-	const root = mkdtempSync(join(tmpdir(), "pi-build-on-use-test-"));
+	const root = mkdtempSync(join(tmpdir(), "pi-compiled-test-"));
 	writeFileSync(join(root, "source.txt"), "v1\n");
 	writeFileSync(join(root, ".gitignore"), "bin/\ncount\n");
 	for (const args of [["init", "-q"], ["add", "."], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"]]) execFileSync("git", ["-C", root, ...args]);
@@ -54,13 +54,13 @@ test("a build that exits 75 is a failure, not a busy lock, so a broken build is 
 
 test("an override binary skips the build, so a prebuilt tool is used as is", async () => {
 	const root = checkout();
-	process.env.PI_BUILD_ON_USE_TEST_TOOL = "/usr/bin/true";
-	assert.equal(await ensureBuilt({ ...spec(root, "exit 1"), overrideEnv: "PI_BUILD_ON_USE_TEST_TOOL" }), "/usr/bin/true");
+	process.env.PI_COMPILED_TEST_TOOL = "/usr/bin/true";
+	assert.equal(await ensureBuilt({ ...spec(root, "exit 1"), overrideEnv: "PI_COMPILED_TEST_TOOL" }), "/usr/bin/true");
 	for (const path of [join(root, "missing"), "true"]) {
-		process.env.PI_BUILD_ON_USE_TEST_TOOL = path;
-		await assert.rejects(ensureBuilt({ ...spec(root, "exit 1"), overrideEnv: "PI_BUILD_ON_USE_TEST_TOOL" }), (error: BuildError) => error.code === "build-failed");
+		process.env.PI_COMPILED_TEST_TOOL = path;
+		await assert.rejects(ensureBuilt({ ...spec(root, "exit 1"), overrideEnv: "PI_COMPILED_TEST_TOOL" }), (error: BuildError) => error.code === "build-failed");
 	}
-	delete process.env.PI_BUILD_ON_USE_TEST_TOOL;
+	delete process.env.PI_COMPILED_TEST_TOOL;
 });
 
 test("kills the whole process group on timeout, so a hung build leaves no orphans", async () => {
@@ -86,17 +86,28 @@ function holdLock(lock: string, script: string) {
 	return spawn(tool[0] ?? "", [...tool.slice(1), lock, "/bin/sh", "-c", script], { cwd: dirname(dirname(lock)), detached: true });
 }
 
-test("a lock held by another session makes this one wait and skip a finished build, so two sessions never build at once", async () => {
+test("two Pi processes building at once run one build, so sessions never build over each other", async () => {
+	const root = checkout();
+	const build = spec(root, "echo x >> count; sleep 0.5; mkdir -p bin && touch bin/tool");
+	const script = `const { ensureBuilt } = await import(${JSON.stringify(join(import.meta.dirname, "index.ts"))}); await ensureBuilt(${JSON.stringify(build)});`;
+	const other = spawn(process.execPath, ["--input-type=module", "-e", script]);
+	const [status] = await Promise.all([new Promise((done) => other.on("close", done)), ensureBuilt(build)]);
+	assert.equal(status, 0);
+	assert.equal(readFileSync(join(root, "count"), "utf8"), "x\n");
+});
+
+test("a binary built from older inputs is rebuilt, so pi update never keeps a stale tool", async () => {
 	const root = checkout();
 	const build = spec(root, "echo x >> count; mkdir -p bin && touch bin/tool");
-	const holder = holdLock(lockPath(build), "sleep 1; touch bin/tool");
-	await new Promise((done) => setTimeout(done, 200));
-	const result = ensureBuilt(build);
-	await new Promise((done) => setTimeout(done, 400));
-	assert.equal(existsSync(join(root, "bin/tool")), false);
-	await new Promise((done) => holder.on("close", done));
-	assert.equal(await result, join(root, "bin/tool"));
-	assert.equal(existsSync(join(root, "count")), false);
+	await ensureBuilt(build);
+	await ensureBuilt(build);
+	assert.equal(readFileSync(join(root, "count"), "utf8"), "x\n");
+	writeFileSync(join(root, "source.txt"), "v2\n");
+	execFileSync("git", ["-C", root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "v2"]);
+	assert.equal(await isBuildNeeded(build), true);
+	await ensureBuilt(build);
+	assert.equal(readFileSync(join(root, "count"), "utf8"), "x\nx\n");
+	assert.equal(await isBuildNeeded(build), false);
 });
 
 test("a lock is released when its holder dies, and a held lock fails as busy, so a crashed session never blocks builds", async () => {
@@ -111,7 +122,7 @@ test("a lock is released when its holder dies, and a held lock fails as busy, so
 });
 
 test("the shipped dist matches the source, so consumers never run stale code", () => {
-	const out = mkdtempSync(join(tmpdir(), "pi-build-on-use-dist-"));
+	const out = mkdtempSync(join(tmpdir(), "pi-compiled-dist-"));
 	const root = join(import.meta.dirname, "..");
 	execFileSync(join(root, "node_modules/.bin/tsc"), ["-p", join(root, "tsconfig.build.json"), "--outDir", out]);
 	for (const file of ["index.js", "index.d.ts"]) assert.equal(readFileSync(join(root, "dist", file), "utf8"), readFileSync(join(out, file), "utf8"), file);

@@ -1,5 +1,6 @@
 import { execFile, spawn } from "node:child_process";
-import { accessSync, constants, existsSync, mkdirSync, realpathSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 export interface BuildSpec {
@@ -40,25 +41,46 @@ export function binaryPath(spec: BuildSpec): string {
 	return override(spec) ?? resolve(spec.packageRoot, spec.binary);
 }
 
-export function isBuildNeeded(spec: BuildSpec): boolean {
-	return override(spec) === undefined && !existsSync(resolve(spec.packageRoot, spec.binary));
+export function stampPath(spec: BuildSpec): string {
+	return `${resolve(spec.packageRoot, spec.binary)}.stamp`;
 }
 
-export function ensureBuilt(spec: BuildSpec): Promise<string> {
+async function inputsFingerprint(spec: BuildSpec): Promise<string> {
+	const listing = await git(spec.packageRoot, ["ls-files", "-s", "--", ...spec.inputs]);
+	return createHash("sha256").update(JSON.stringify(spec.buildCommand)).update("\0").update(listing).digest("hex");
+}
+
+export async function isBuildNeeded(spec: BuildSpec): Promise<boolean> {
+	if (override(spec) !== undefined) return false;
+	if (!existsSync(resolve(spec.packageRoot, spec.binary))) return true;
+	let fingerprint: string;
+	try {
+		fingerprint = await inputsFingerprint(spec);
+	} catch {
+		return false;
+	}
+	let stamp = "";
+	try { stamp = readFileSync(stampPath(spec), "utf8"); } catch {}
+	return stamp !== fingerprint;
+}
+
+export async function ensureBuilt(spec: BuildSpec): Promise<string> {
 	const prebuilt = override(spec);
 	if (prebuilt !== undefined) {
 		try {
 			if (!isAbsolute(prebuilt)) throw new Error("relative");
 			accessSync(prebuilt, constants.X_OK);
 		} catch {
-			return Promise.reject(new BuildError("build-failed", `${spec.overrideEnv} names ${prebuilt}, which is not an absolute path to an executable file.`));
+			throw new BuildError("build-failed", `${spec.overrideEnv} names ${prebuilt}, which is not an absolute path to an executable file.`);
 		}
-		return Promise.resolve(prebuilt);
+		return prebuilt;
 	}
-	if (!isBuildNeeded(spec)) return Promise.resolve(binaryPath(spec));
 	const key = resolve(spec.packageRoot, spec.binary);
 	const existing = inFlight.get(key);
 	if (existing) return existing;
+	if (!(await isBuildNeeded(spec))) return key;
+	const running = inFlight.get(key);
+	if (running) return running;
 	const build = buildLocked(spec, key).finally(() => inFlight.delete(key));
 	inFlight.set(key, build);
 	return build;
@@ -110,7 +132,7 @@ async function buildLocked(spec: BuildSpec, key: string): Promise<string> {
 	const refusal = await refusalReason(spec);
 	if (refusal) throw new BuildError("build-refused", `Refused to build ${spec.binary}: ${refusal}`);
 	mkdirSync(dirname(key), { recursive: true });
-	await run(spec, key, spec.timeoutMs ?? defaultTimeoutMs);
+	await run(spec, key, await inputsFingerprint(spec), spec.timeoutMs ?? defaultTimeoutMs);
 	if (!existsSync(key)) throw new BuildError("build-failed", `The build finished but ${key} does not exist.`);
 	return key;
 }
@@ -136,17 +158,18 @@ function lockSeconds(timeoutMs: number): number {
 	return Math.max(1, Math.round(timeoutMs / 1000));
 }
 
-function lockedCommand(spec: BuildSpec, key: string, timeoutMs: number): string[] {
+function lockedCommand(spec: BuildSpec, key: string, fingerprint: string, timeoutMs: number): string[] {
 	const seconds = String(lockSeconds(timeoutMs));
 	const tool = lockTool() ?? "";
 	const lock = process.platform === "darwin" ? [tool, "-k", "-s", "-t", seconds, `${key}.lock`] : [tool, "-o", "-w", seconds, "-E", String(busyStatus), `${key}.lock`];
-	return [...lock, "/bin/sh", "-c", `test -e "$0" && exit 0; "$@"; status=$?; [ "$status" = ${busyStatus} ] && exit ${busyStatus + 1}; exit "$status"`, key, ...spec.buildCommand];
+	const wrapper = `expected=$1; shift; if [ -e "$0" ] && [ "$(cat "$0.stamp" 2>/dev/null)" = "$expected" ]; then exit 0; fi; "$@"; status=$?; [ "$status" = ${busyStatus} ] && exit ${busyStatus + 1}; [ "$status" = 0 ] && printf '%s' "$expected" > "$0.stamp"; exit "$status"`;
+	return [...lock, "/bin/sh", "-c", wrapper, key, fingerprint, ...spec.buildCommand];
 }
 
-function run(spec: BuildSpec, key: string, timeoutMs: number): Promise<void> {
+function run(spec: BuildSpec, key: string, fingerprint: string, timeoutMs: number): Promise<void> {
 	const names = [...baseVariables, ...(spec.envAllowlist ?? [])];
 	const env = Object.fromEntries(names.flatMap((name) => process.env[name] ? [[name, process.env[name]]] : []));
-	const [command = "", ...args] = lockedCommand(spec, key, timeoutMs);
+	const [command = "", ...args] = lockedCommand(spec, key, fingerprint, timeoutMs);
 	return new Promise((done, reject) => {
 		const child = spawn(command, args, { cwd: spec.packageRoot, env, detached: true, stdio: ["ignore", "ignore", "pipe"] });
 		let stderr = "";

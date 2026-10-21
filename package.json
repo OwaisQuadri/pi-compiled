@@ -1,7 +1,7 @@
 {
-  "name": "pi-build-on-use",
+  "name": "pi-compiled",
   "version": "0.1.0",
-  "description": "Build a Pi extension's compiled tool on first use, only from a clean Git checkout.",
+  "description": "Build a Pi package's compiled tool after install and update, only from a clean Git checkout.",
   "type": "module",
   "license": "MIT",
   "exports": {

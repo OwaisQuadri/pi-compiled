@@ -34,7 +34,7 @@ test("refuses ignored files and paths outside the package, so nothing unreviewed
 		await assert.rejects(ensureBuilt({ ...spec(root, "true"), inputs }), (error: BuildError) => error.code === "build-refused" && /not inside/.test(error.message));
 	}
 	await assert.rejects(ensureBuilt({ ...spec(root, "true"), buildCommand: ["make"] }), (error: BuildError) => error.code === "build-refused" && /absolute/.test(error.message));
-	await assert.rejects(ensureBuilt({ ...spec(root, "true"), inputs: ["sourcee.txt"] }), (error: BuildError) => error.code === "build-refused");
+	await assert.rejects(ensureBuilt({ ...spec(root, "true"), inputs: ["sourcee.txt"] }), (error: BuildError) => error.code === "build-refused" && /does not match a committed file/.test(error.message));
 	symlinkSync(tmpdir(), join(root, "outside"));
 	await assert.rejects(ensureBuilt({ ...spec(root, "true"), inputs: ["outside"] }), (error: BuildError) => error.code === "build-refused" && /symbolic link/.test(error.message));
 	symlinkSync("source.txt", join(root, "alias"));
@@ -64,6 +64,15 @@ test("kills the whole process group on timeout, so a hung build leaves no orphan
 	const pid = Number(readFileSync(join(root, "grandchild"), "utf8"));
 	await new Promise((done) => setTimeout(done, 100));
 	assert.throws(() => process.kill(pid, 0));
+});
+
+test("a build that leaves a process holding stderr succeeds and releases the lock, so a toolchain daemon neither fakes a timeout nor blocks later builds", async () => {
+	const root = checkout();
+	const build = spec(root, "sleep 30 >&2 & echo $! > daemon; mkdir -p bin && touch bin/tool", 300);
+	assert.equal(await ensureBuilt(build), join(root, "bin/tool"));
+	rmSync(join(root, "bin/tool"));
+	assert.equal(await ensureBuilt({ ...build, buildCommand: ["/bin/sh", "-c", "touch bin/tool"] }), join(root, "bin/tool"));
+	process.kill(Number(readFileSync(join(root, "daemon"), "utf8")), "SIGKILL");
 });
 
 function holdLock(lock: string, script: string) {

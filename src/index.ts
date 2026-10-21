@@ -94,7 +94,13 @@ export async function refusalReason(spec: BuildSpec): Promise<string> {
 	if (!spec.inputs.length) return "no build inputs were declared.";
 	const changes = await git(spec.packageRoot, ["status", "--porcelain", "--ignored", "--untracked-files=all", "--", ...spec.inputs]);
 	if (changes) return `the build inputs have uncommitted or ignored changes:\n${changes}\n`;
-	const links = (await git(spec.packageRoot, ["ls-files", "-s", "--error-unmatch", "--", ...spec.inputs])).split("\n").filter((line) => line.startsWith("120000 "));
+	let listing: string;
+	try {
+		listing = await git(spec.packageRoot, ["ls-files", "-s", "--error-unmatch", "--", ...spec.inputs]);
+	} catch (error) {
+		return `a build input does not match a committed file: ${(error as Error).message}`;
+	}
+	const links = listing.split("\n").filter((line) => line.startsWith("120000 "));
 	return links.length ? `the build inputs contain symbolic links:\n${links.map((line) => line.split("\t")[1]).join("\n")}\n` : "";
 }
 
@@ -131,7 +137,7 @@ function lockSeconds(timeoutMs: number): number {
 function lockedCommand(spec: BuildSpec, key: string, timeoutMs: number): string[] {
 	const seconds = String(lockSeconds(timeoutMs));
 	const tool = lockTool() ?? "";
-	const lock = process.platform === "darwin" ? [tool, "-k", "-s", "-t", seconds, `${key}.lock`] : [tool, "-w", seconds, "-E", String(busyStatus), `${key}.lock`];
+	const lock = process.platform === "darwin" ? [tool, "-k", "-s", "-t", seconds, `${key}.lock`] : [tool, "-o", "-w", seconds, "-E", String(busyStatus), `${key}.lock`];
 	return [...lock, "/bin/sh", "-c", `test -e "$0" && exit 0; "$@"; status=$?; [ "$status" = ${busyStatus} ] && exit ${busyStatus + 1}; exit "$status"`, key, ...spec.buildCommand];
 }
 
@@ -152,7 +158,8 @@ function run(spec: BuildSpec, key: string, timeoutMs: number): Promise<void> {
 			reject(new BuildError("build-timeout", `The build did not finish within ${Math.round((2 * timeoutMs) / 1000)} seconds, including the wait for the lock.`));
 		}, 2 * timeoutMs);
 		child.on("error", (error) => { clearTimeout(timer); reject(new BuildError("build-failed", `Could not start the build: ${error.message}`)); });
-		child.on("close", (status) => {
+		child.on("exit", (status) => {
+			child.stderr.destroy();
 			clearTimeout(timer);
 			if (isTimedOut) return;
 			if (status === busyStatus) return reject(new BuildError("build-busy", `Another Pi session held the build lock ${key}.lock for longer than ${lockSeconds(timeoutMs)} seconds.`));

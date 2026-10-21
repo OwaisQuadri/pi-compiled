@@ -58,14 +58,15 @@ test("with isUpstreamRequired, builds only the fetched upstream commit, so a com
 	await assert.rejects(ensureBuilt(build), (error: BuildError) => error.code === "build-refused" && /not the fetched upstream commit/.test(error.message));
 	execFileSync("git", ["-C", root, "reset", "-q", "--hard", "@{upstream}"]);
 	assert.equal(await ensureBuilt(build), join(root, "bin/tool"));
-	await assert.rejects(ensureBuilt({ ...spec(remote, "true"), isUpstreamRequired: true }), (error: BuildError) => error.code === "build-refused" && /no upstream branch/.test(error.message));
+	await assert.rejects(ensureBuilt({ ...spec(remote, "true"), isUpstreamRequired: true }), (error: BuildError) => error.code === "build-refused" && /no fetched upstream branch/.test(error.message));
 });
 
-test("a package that Git cannot check still reports that it needs a build, so the refusal reaches the user", async () => {
+test("a built binary in a package that Git cannot check is used as is, so a working tool never becomes unusable", async () => {
 	const root = mkdtempSync(join(tmpdir(), "pi-compiled-plain-"));
 	mkdirSync(join(root, "bin"));
 	writeFileSync(join(root, "bin/tool"), "");
-	assert.equal(await isBuildNeeded(spec(root, "true")), true);
+	assert.equal(await isBuildNeeded(spec(root, "true")), false);
+	assert.equal(await ensureBuilt(spec(root, "exit 1")), join(root, "bin/tool"));
 });
 
 test("a build that exits 75 is a failure, not a busy lock, so a broken build is never retried as busy", async () => {

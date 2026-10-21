@@ -58,7 +58,7 @@ export async function isBuildNeeded(spec: BuildSpec): Promise<boolean> {
 	try {
 		fingerprint = await inputsFingerprint(spec);
 	} catch {
-		return true;
+		return false;
 	}
 	let stamp = "";
 	try { stamp = readFileSync(stampPath(spec), "utf8"); } catch {}
@@ -119,7 +119,7 @@ export async function refusalReason(spec: BuildSpec): Promise<string> {
 		try {
 			upstream = await git(spec.packageRoot, ["rev-parse", "--verify", "@{upstream}^{commit}"]);
 		} catch {
-			return "the checkout has no upstream branch, and this package builds only the fetched upstream commit.";
+			return "the checkout has no fetched upstream branch, and this package builds only the fetched upstream commit.";
 		}
 		const head = await git(spec.packageRoot, ["rev-parse", "--verify", "HEAD^{commit}"]);
 		if (head !== upstream) return `HEAD ${head.slice(0, 12)} is not the fetched upstream commit ${upstream.slice(0, 12)}, and this package builds only the fetched upstream commit.`;

@@ -7,10 +7,11 @@ export function progressOf(line) {
     return match ? { line: match[3] ?? "", completed: Number(match[1]), total: Number(match[2]) } : { line };
 }
 export function progressBar(progress, width = 20) {
+    const line = progress.line.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, "").replace(/[\x00-\x1f\x7f]/g, "").slice(0, 120);
     if (progress.completed === undefined || !progress.total)
-        return progress.line;
+        return line;
     const filled = Math.min(width, Math.round((progress.completed / progress.total) * width));
-    return `[${"█".repeat(filled)}${"░".repeat(width - filled)}] ${progress.completed}/${progress.total} ${progress.line}`;
+    return `[${"█".repeat(filled)}${"░".repeat(width - filled)}] ${progress.completed}/${progress.total} ${line}`;
 }
 export class BuildError extends Error {
     code;

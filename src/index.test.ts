@@ -84,6 +84,8 @@ test("build output reaches onProgress line by line with step counts, so the user
 	assert.deepEqual(second, ["Build complete!"]);
 	assert.equal(progressBar({ line: "Compiling a", completed: 1, total: 4 }, 8), "[██░░░░░░] 1/4 Compiling a");
 	assert.equal(progressBar({ line: "Linking" }), "Linking");
+	assert.equal(progressBar({ line: "\x1b[1;32mLinking\x1b[0m\r\x07" }), "Linking");
+	assert.equal(progressBar({ line: "x".repeat(500) }).length, 120);
 	assert.deepEqual(progressOf("[98 / 103] Compiling c"), { line: "Compiling c", completed: 98, total: 103 });
 });
 

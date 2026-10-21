@@ -30,9 +30,10 @@ export function progressOf(line: string): BuildProgress {
 }
 
 export function progressBar(progress: BuildProgress, width = 20): string {
-	if (progress.completed === undefined || !progress.total) return progress.line;
+	const line = progress.line.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, "").replace(/[\x00-\x1f\x7f]/g, "").slice(0, 120);
+	if (progress.completed === undefined || !progress.total) return line;
 	const filled = Math.min(width, Math.round((progress.completed / progress.total) * width));
-	return `[${"█".repeat(filled)}${"░".repeat(width - filled)}] ${progress.completed}/${progress.total} ${progress.line}`;
+	return `[${"█".repeat(filled)}${"░".repeat(width - filled)}] ${progress.completed}/${progress.total} ${line}`;
 }
 
 export type BuildErrorCode = "build-refused" | "build-failed" | "build-timeout" | "build-busy";

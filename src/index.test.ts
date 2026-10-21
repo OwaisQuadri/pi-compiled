@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { BuildError, ensureBuilt, isBuildNeeded, lockPath, progressBar, type BuildProgress, type BuildSpec } from "./index.ts";
+import { BuildError, ensureBuilt, isBuildNeeded, lockPath, progressBar, progressOf, type BuildProgress, type BuildSpec } from "./index.ts";
 
 function checkout(): string {
 	const root = mkdtempSync(join(tmpdir(), "pi-compiled-test-"));
@@ -84,6 +84,7 @@ test("build output reaches onProgress line by line with step counts, so the user
 	assert.deepEqual(second, ["Build complete!"]);
 	assert.equal(progressBar({ line: "Compiling a", completed: 1, total: 4 }, 8), "[██░░░░░░] 1/4 Compiling a");
 	assert.equal(progressBar({ line: "Linking" }), "Linking");
+	assert.deepEqual(progressOf("[98 / 103] Compiling c"), { line: "Compiling c", completed: 98, total: 103 });
 });
 
 test("a build that exits 75 is a failure, not a busy lock, so a broken build is never retried as busy", async () => {

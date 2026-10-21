@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 export function progressOf(line) {
-    const match = /^\[(\d+)\/(\d+)\]\s*(.*)$/.exec(line);
+    const match = /^\[(\d+)\s*\/\s*(\d+)\]\s*(.*)$/.exec(line);
     return match ? { line: match[3] ?? "", completed: Number(match[1]), total: Number(match[2]) } : { line };
 }
 export function progressBar(progress, width = 20) {

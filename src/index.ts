@@ -25,7 +25,7 @@ export interface BuildOptions {
 }
 
 export function progressOf(line: string): BuildProgress {
-	const match = /^\[(\d+)\/(\d+)\]\s*(.*)$/.exec(line);
+	const match = /^\[(\d+)\s*\/\s*(\d+)\]\s*(.*)$/.exec(line);
 	return match ? { line: match[3] ?? "", completed: Number(match[1]), total: Number(match[2]) } : { line };
 }
 

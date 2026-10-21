@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { BuildError, ensureBuilt, isBuildNeeded, lockPath, type BuildSpec } from "./index.ts";
+import { BuildError, ensureBuilt, isBuildNeeded, lockPath, progressBar, type BuildProgress, type BuildSpec } from "./index.ts";
 
 function checkout(): string {
 	const root = mkdtempSync(join(tmpdir(), "pi-compiled-test-"));
@@ -67,6 +67,16 @@ test("a built binary in a package that Git cannot check is used as is, so a work
 	writeFileSync(join(root, "bin/tool"), "");
 	assert.equal(await isBuildNeeded(spec(root, "true")), false);
 	assert.equal(await ensureBuilt(spec(root, "exit 1")), join(root, "bin/tool"));
+});
+
+test("build output reaches onProgress line by line with step counts, so the user sees how far the build is", async () => {
+	const root = checkout();
+	const seen: BuildProgress[] = [];
+	await ensureBuilt(spec(root, "printf 'Building\\n[1/4] Compiling a\\n'; sleep 0.1; printf '[2/4] Comp'; sleep 0.1; printf 'iling b\\n'; printf 'a warning\\n' >&2; mkdir -p bin && touch bin/tool"), { onProgress: (progress) => seen.push(progress) });
+	assert.deepEqual(seen.filter((progress) => progress.line !== "a warning"), [{ line: "Building" }, { line: "Compiling a", completed: 1, total: 4 }, { line: "Compiling b", completed: 2, total: 4 }]);
+	assert.ok(seen.some((progress) => progress.line === "a warning"));
+	assert.equal(progressBar({ line: "Compiling a", completed: 1, total: 4 }, 8), "[██░░░░░░] 1/4 Compiling a");
+	assert.equal(progressBar({ line: "Linking" }), "Linking");
 });
 
 test("a build that exits 75 is a failure, not a busy lock, so a broken build is never retried as busy", async () => {

@@ -14,6 +14,27 @@ export interface BuildSpec {
 	isUpstreamRequired?: boolean;
 }
 
+export interface BuildProgress {
+	line: string;
+	completed?: number;
+	total?: number;
+}
+
+export interface BuildOptions {
+	onProgress?: (progress: BuildProgress) => void;
+}
+
+export function progressOf(line: string): BuildProgress {
+	const match = /^\[(\d+)\/(\d+)\]\s*(.*)$/.exec(line);
+	return match ? { line: match[3] ?? "", completed: Number(match[1]), total: Number(match[2]) } : { line };
+}
+
+export function progressBar(progress: BuildProgress, width = 20): string {
+	if (progress.completed === undefined || !progress.total) return progress.line;
+	const filled = Math.min(width, Math.round((progress.completed / progress.total) * width));
+	return `[${"█".repeat(filled)}${"░".repeat(width - filled)}] ${progress.completed}/${progress.total} ${progress.line}`;
+}
+
 export type BuildErrorCode = "build-refused" | "build-failed" | "build-timeout" | "build-busy";
 
 export class BuildError extends Error {
@@ -65,7 +86,7 @@ export async function isBuildNeeded(spec: BuildSpec): Promise<boolean> {
 	return stamp !== fingerprint;
 }
 
-export async function ensureBuilt(spec: BuildSpec): Promise<string> {
+export async function ensureBuilt(spec: BuildSpec, options: BuildOptions = {}): Promise<string> {
 	const prebuilt = override(spec);
 	if (prebuilt !== undefined) {
 		try {
@@ -82,7 +103,7 @@ export async function ensureBuilt(spec: BuildSpec): Promise<string> {
 	if (!(await isBuildNeeded(spec))) return key;
 	const running = inFlight.get(key);
 	if (running) return running;
-	const build = buildLocked(spec, key).finally(() => inFlight.delete(key));
+	const build = buildLocked(spec, key, options).finally(() => inFlight.delete(key));
 	inFlight.set(key, build);
 	return build;
 }
@@ -139,11 +160,11 @@ export async function refusalReason(spec: BuildSpec): Promise<string> {
 	return links.length ? `the build inputs contain symbolic links:\n${links.map((line) => line.split("\t")[1]).join("\n")}\n` : "";
 }
 
-async function buildLocked(spec: BuildSpec, key: string): Promise<string> {
+async function buildLocked(spec: BuildSpec, key: string, options: BuildOptions): Promise<string> {
 	const refusal = await refusalReason(spec);
 	if (refusal) throw new BuildError("build-refused", `Refused to build ${spec.binary}: ${refusal}`);
 	mkdirSync(dirname(key), { recursive: true });
-	await run(spec, key, await inputsFingerprint(spec), spec.timeoutMs ?? defaultTimeoutMs);
+	await run(spec, key, await inputsFingerprint(spec), spec.timeoutMs ?? defaultTimeoutMs, options);
 	if (!existsSync(key)) throw new BuildError("build-failed", `The build finished but ${key} does not exist.`);
 	return key;
 }
@@ -177,24 +198,39 @@ function lockedCommand(spec: BuildSpec, key: string, fingerprint: string, timeou
 	return [...lock, "/bin/sh", "-c", wrapper, key, fingerprint, ...spec.buildCommand];
 }
 
-function run(spec: BuildSpec, key: string, fingerprint: string, timeoutMs: number): Promise<void> {
+function lines(onLine: (line: string) => void): (chunk: string) => void {
+	let pending = "";
+	return (chunk) => {
+		const parts = (pending + chunk).split(/\r?\n|\r/);
+		pending = parts.pop() ?? "";
+		for (const part of parts) if (part.trim()) onLine(part.trim());
+	};
+}
+
+function run(spec: BuildSpec, key: string, fingerprint: string, timeoutMs: number, options: BuildOptions): Promise<void> {
 	const names = [...baseVariables, ...(spec.envAllowlist ?? [])];
 	const env = Object.fromEntries(names.flatMap((name) => process.env[name] ? [[name, process.env[name]]] : []));
 	const [command = "", ...args] = lockedCommand(spec, key, fingerprint, timeoutMs);
 	return new Promise((done, reject) => {
-		const child = spawn(command, args, { cwd: spec.packageRoot, env, detached: true, stdio: ["ignore", "ignore", "pipe"] });
+		const child = spawn(command, args, { cwd: spec.packageRoot, env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
 		let stderr = "";
 		let isTimedOut = false;
 		child.stderr.setEncoding("utf8");
-		child.stderr.on("data", (chunk: string) => { stderr = (stderr + chunk).slice(-4000); });
+		child.stdout.setEncoding("utf8");
+		const report = (line: string) => { try { options.onProgress?.(progressOf(line)); } catch {} };
+		child.stdout.on("data", lines(report));
+		const stderrLines = lines(report);
+		child.stderr.on("data", (chunk: string) => { stderr = (stderr + chunk).slice(-4000); stderrLines(chunk); });
 		const timer = setTimeout(() => {
 			isTimedOut = true;
 			try { if (child.pid) process.kill(-child.pid, "SIGKILL"); } catch {}
+			child.stdout.destroy();
 			child.stderr.destroy();
 			reject(new BuildError("build-timeout", `The build did not finish within ${Math.round((2 * timeoutMs) / 1000)} seconds, including the wait for the lock.`));
 		}, 2 * timeoutMs);
 		child.on("error", (error) => { clearTimeout(timer); reject(new BuildError("build-failed", `Could not start the build: ${error.message}`)); });
 		child.on("exit", (status) => {
+			child.stdout.destroy();
 			child.stderr.destroy();
 			clearTimeout(timer);
 			if (isTimedOut) return;

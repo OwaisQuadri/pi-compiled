@@ -108,6 +108,7 @@ test("a binary built from older inputs is rebuilt, so pi update never keeps a st
 	await ensureBuilt(build);
 	assert.equal(readFileSync(join(root, "count"), "utf8"), "x\nx\n");
 	assert.equal(await isBuildNeeded(build), false);
+	assert.equal(await isBuildNeeded({ ...build, inputs: ["source.txt", ".gitignore"] }), true);
 });
 
 test("a lock is released when its holder dies, and a held lock fails as busy, so a crashed session never blocks builds", async () => {

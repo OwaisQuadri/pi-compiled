@@ -47,7 +47,7 @@ export function stampPath(spec: BuildSpec): string {
 
 async function inputsFingerprint(spec: BuildSpec): Promise<string> {
 	const listing = await git(spec.packageRoot, ["ls-files", "-s", "--", ...spec.inputs]);
-	return createHash("sha256").update(JSON.stringify(spec.buildCommand)).update("\0").update(listing).digest("hex");
+	return createHash("sha256").update(JSON.stringify([spec.buildCommand, spec.inputs])).update("\0").update(listing).digest("hex");
 }
 
 export async function isBuildNeeded(spec: BuildSpec): Promise<boolean> {

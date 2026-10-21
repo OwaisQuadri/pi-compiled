@@ -4,7 +4,7 @@ Adds a compile step to Pi packages. Pi loads TypeScript as is. A package that al
 
 ## When it builds
 
-Call `ensureBuilt` when the extension loads (`session_start`). It builds when the binary is missing, or when the committed build inputs changed since the binary was built. After each build it writes `<binary>.stamp`, a hash of the build command and the committed inputs.
+Call `ensureBuilt` when the extension loads (`session_start`). It builds when the binary is missing, or when the committed build inputs changed since the binary was built. After each build it writes `<binary>.stamp`, a hash of the build command, the input list, and the committed inputs. Environment values, including `envAllowlist` variables, are not part of it, because they can differ between sessions; delete the binary to rebuild after changing one.
 
 - `pi install` clones the package, so the next load builds the tool.
 - `pi update` moves the clone to a new commit but keeps ignored files, including the old binary. The stamp no longer matches, so the next load rebuilds it.

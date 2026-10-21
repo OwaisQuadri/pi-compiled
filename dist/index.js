@@ -27,7 +27,7 @@ export function stampPath(spec) {
 }
 async function inputsFingerprint(spec) {
     const listing = await git(spec.packageRoot, ["ls-files", "-s", "--", ...spec.inputs]);
-    return createHash("sha256").update(JSON.stringify(spec.buildCommand)).update("\0").update(listing).digest("hex");
+    return createHash("sha256").update(JSON.stringify([spec.buildCommand, spec.inputs])).update("\0").update(listing).digest("hex");
 }
 export async function isBuildNeeded(spec) {
     if (override(spec) !== undefined)

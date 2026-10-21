@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, openSync, closeSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, realpathSync, unlinkSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -31,6 +31,10 @@ const baseVariables = ["PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "DEVELOPER_D
 const defaultTimeoutMs = 600_000;
 const inFlight = new Map<string, Promise<string>>();
 
+export function lockPath(spec: BuildSpec): string {
+	return join(tmpdir(), `pi-build-on-use-${createHash("sha256").update(resolve(spec.packageRoot, spec.binary)).digest("hex").slice(0, 16)}.lock`);
+}
+
 export function binaryPath(spec: BuildSpec): string {
 	const override = spec.overrideEnv ? process.env[spec.overrideEnv] : undefined;
 	return override || resolve(spec.packageRoot, spec.binary);
@@ -45,7 +49,7 @@ export function ensureBuilt(spec: BuildSpec): Promise<string> {
 	const key = resolve(spec.packageRoot, spec.binary);
 	const existing = inFlight.get(key);
 	if (existing) return existing;
-	const build = buildLocked(spec, key).finally(() => inFlight.delete(key));
+	const build = buildLocked(spec, key, lockPath(spec)).finally(() => inFlight.delete(key));
 	inFlight.set(key, build);
 	return build;
 }
@@ -58,9 +62,8 @@ export async function refusalReason(spec: BuildSpec): Promise<string> {
 	return changes ? `the build inputs have uncommitted or ignored changes:\n${changes}\n` : "";
 }
 
-async function buildLocked(spec: BuildSpec, key: string): Promise<string> {
+async function buildLocked(spec: BuildSpec, key: string, lock: string): Promise<string> {
 	const timeoutMs = spec.timeoutMs ?? defaultTimeoutMs;
-	const lock = join(tmpdir(), `pi-build-on-use-${createHash("sha256").update(key).digest("hex").slice(0, 16)}.lock`);
 	await acquire(lock, timeoutMs);
 	try {
 		if (existsSync(key)) return key;
@@ -78,8 +81,9 @@ async function acquire(lock: string, timeoutMs: number): Promise<void> {
 	const deadline = Date.now() + timeoutMs;
 	for (;;) {
 		try {
-			closeSync(openSync(lock, "wx"));
-			writeFileSync(lock, String(process.pid));
+			const descriptor = openSync(lock, "wx");
+			writeSync(descriptor, String(process.pid));
+			closeSync(descriptor);
 			return;
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;

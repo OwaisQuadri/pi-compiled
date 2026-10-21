@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { BuildError, ensureBuilt, type BuildSpec } from "./index.ts";
+import { BuildError, ensureBuilt, lockPath, type BuildSpec } from "./index.ts";
 
 function checkout(): string {
 	const root = mkdtempSync(join(tmpdir(), "pi-build-on-use-test-"));
@@ -30,6 +30,35 @@ test("kills the whole process group on timeout, so a hung build leaves no orphan
 	const pid = Number(readFileSync(join(root, "grandchild"), "utf8"));
 	await new Promise((done) => setTimeout(done, 100));
 	assert.throws(() => process.kill(pid, 0));
+});
+
+test("a lock left by a dead process is taken over, so a crashed session does not block builds forever", async () => {
+	const root = checkout();
+	const build = spec(root, "mkdir -p bin && touch bin/tool");
+	const dead = spawn("/usr/bin/true");
+	await new Promise((done) => dead.on("close", done));
+	writeFileSync(lockPath(build), String(dead.pid));
+	assert.equal(await ensureBuilt(build), join(root, "bin/tool"));
+	assert.equal(existsSync(lockPath(build)), false);
+});
+
+test("a lock held by a live process makes another session wait, so two sessions never build at once", async () => {
+	const root = checkout();
+	const build = spec(root, "mkdir -p bin && touch bin/tool");
+	writeFileSync(lockPath(build), String(process.ppid));
+	const result = ensureBuilt(build);
+	await new Promise((done) => setTimeout(done, 400));
+	assert.equal(existsSync(join(root, "bin/tool")), false);
+	unlinkSync(lockPath(build));
+	assert.equal(await result, join(root, "bin/tool"));
+});
+
+test("the shipped dist matches the source, so consumers never run stale code", () => {
+	const out = mkdtempSync(join(tmpdir(), "pi-build-on-use-dist-"));
+	const root = join(import.meta.dirname, "..");
+	execFileSync(join(root, "node_modules/.bin/tsc"), ["-p", join(root, "tsconfig.build.json"), "--outDir", out]);
+	for (const file of ["index.js", "index.d.ts"]) assert.equal(readFileSync(join(root, "dist", file), "utf8"), readFileSync(join(out, file), "utf8"), file);
+	rmSync(out, { recursive: true });
 });
 
 test("concurrent callers share one in-flight build, so the tool is not built twice", async () => {

@@ -10,6 +10,7 @@ It refuses to build unless the package is its own Git checkout and every build i
 ensureBuilt(spec: BuildSpec): Promise<string>
 isBuildNeeded(spec: BuildSpec): boolean
 binaryPath(spec: BuildSpec): string
+lockPath(spec: BuildSpec): string
 refusalReason(spec: BuildSpec): Promise<string>
 
 interface BuildSpec {
@@ -25,7 +26,7 @@ interface BuildSpec {
 class BuildError extends Error { code: "build-refused" | "build-failed" | "build-timeout" }
 ```
 
-`ensureBuilt` returns the absolute binary path. The build runs in its own process group with only allowlisted variables. On timeout the whole group is killed. Concurrent calls in one process share one build, and a lock file in the temp directory serializes builds across Pi sessions. The binary must exist after the build.
+`lockPath` returns the lock file for a spec. `ensureBuilt` returns the absolute binary path. The build runs in its own process group with only allowlisted variables. On timeout the whole group is killed. Concurrent calls in one process share one build, and a lock file in the temp directory serializes builds across Pi sessions. The binary must exist after the build.
 
 `refusalReason` returns an empty string when a build is allowed. Use it with `isBuildNeeded` to ask the user before building.
 
@@ -58,4 +59,8 @@ pi.on("session_start", async (_event, ctx) => {
 });
 ```
 
-Keep the binary's output directory out of `inputs`, and list it in `.gitignore`.
+List specific paths in `inputs`, never `.`. Pi installs this package into the consumer's ignored `node_modules`, so `.` always refuses the build. Keep the binary's output directory out of `inputs`, and list it in `.gitignore`.
+
+## Development
+
+The package ships compiled JavaScript in `dist`, because Node does not strip types from files under `node_modules`. Run `npm run build` after changing `src/index.ts` and commit `dist`. A test fails when `dist` does not match the source.

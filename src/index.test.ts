@@ -69,6 +69,68 @@ test("a built binary in a package that Git cannot check is used as is, so a work
 	assert.equal(await ensureBuilt(spec(root, "exit 1")), join(root, "bin/tool"));
 });
 
+test("strict verification refuses dirty inputs even with a matching binary and stamp", async () => {
+	for (const cleanupPaths of [undefined, ["scratch"]]) {
+		const root = checkout();
+		const build = { ...spec(root, "echo x >> count; printf working > bin/tool"), cleanupPaths, isGitVerificationRequired: true };
+		await ensureBuilt(build);
+		const stamp = readFileSync(stampPath(build), "utf8");
+		await ensureBuilt(build);
+		assert.equal(readFileSync(join(root, "count"), "utf8"), "x\n");
+		mkdirSync(join(root, "scratch"));
+		writeFileSync(join(root, "scratch/keep"), "keep");
+		writeFileSync(join(root, "source.txt"), "dirty\n");
+		await assert.rejects(ensureBuilt(build), (error: BuildError) => error.code === "build-refused");
+		assert.equal(readFileSync(join(root, "bin/tool"), "utf8"), "working");
+		assert.equal(readFileSync(stampPath(build), "utf8"), stamp);
+		assert.equal(readFileSync(join(root, "scratch/keep"), "utf8"), "keep");
+		assert.equal(readFileSync(join(root, "count"), "utf8"), "x\n");
+	}
+});
+
+test("strict installation requests cannot inherit an in-flight unverifiable Git fallback", async () => {
+	for (const cleanupPaths of [undefined, ["scratch"]]) {
+		const root = checkout();
+		const build = { ...spec(root, "echo built > count; printf replaced > bin/tool"), cleanupPaths, isGitVerificationRequired: false };
+		mkdirSync(join(root, "bin"));
+		mkdirSync(join(root, "scratch"));
+		writeFileSync(join(root, "bin/tool"), "working");
+		writeFileSync(join(root, "scratch/keep"), "keep");
+		rmSync(join(root, ".git"), { recursive: true });
+		const strict = { ...build, isGitVerificationRequired: true };
+		assert.equal(await isBuildNeeded(build), false);
+		await assert.rejects(isBuildNeeded(strict), (error: BuildError) => error.code === "build-refused");
+		const fallback = ensureBuilt(build);
+		await assert.rejects(ensureBuilt(strict), (error: BuildError) => error.code === "build-refused");
+		assert.equal(await fallback, join(root, "bin/tool"));
+		assert.equal(readFileSync(join(root, "bin/tool"), "utf8"), "working");
+		assert.equal(readFileSync(join(root, "scratch/keep"), "utf8"), "keep");
+		assert.equal(existsSync(stampPath(build)), false);
+		assert.equal(existsSync(join(root, "count")), false);
+	}
+});
+
+test("lock workers refuse strict success when Git becomes unverifiable after admission", () => {
+	for (const mode of [[], ["package"]]) {
+		const root = checkout();
+		const build = { ...spec(root, "echo built > count; printf replaced > bin/tool"), cleanupPaths: ["scratch"] };
+		mkdirSync(join(root, "bin"));
+		mkdirSync(join(root, "scratch"));
+		writeFileSync(join(root, "bin/tool"), "working");
+		writeFileSync(stampPath(build), "previous stamp");
+		writeFileSync(join(root, "scratch/keep"), "keep");
+		rmSync(join(root, ".git"), { recursive: true });
+		for (const isGitVerificationRequired of [true, false]) {
+			const result = spawnSync(process.execPath, [join(import.meta.dirname, "worker.ts"), JSON.stringify({ ...build, isGitVerificationRequired }), ...mode], { encoding: "utf8", timeout: 10_000 });
+			assert.equal(result.status, isGitVerificationRequired ? 77 : 0, result.stderr);
+			assert.equal(readFileSync(join(root, "bin/tool"), "utf8"), "working");
+			assert.equal(readFileSync(stampPath(build), "utf8"), "previous stamp");
+			assert.equal(readFileSync(join(root, "scratch/keep"), "utf8"), "keep");
+			assert.equal(existsSync(join(root, "count")), false);
+		}
+	}
+});
+
 test("build output reaches onProgress line by line with step counts, so the user sees how far the build is", async () => {
 	const root = checkout();
 	const seen: BuildProgress[] = [];
@@ -176,7 +238,7 @@ test("a lock is released when its holder dies, and a held lock fails as busy, so
 	assert.equal(await ensureBuilt(build), join(root, "bin/tool"));
 });
 
-test("the shipped dist matches the source, so consumers never run stale code", () => {
+test("the shipped compiler and strict verification API match the source, so consumers never run stale code", () => {
 	const out = mkdtempSync(join(tmpdir(), "pi-compiled-dist-"));
 	const root = join(import.meta.dirname, "..");
 	execFileSync(join(root, "node_modules/.bin/tsc"), ["-p", join(root, "tsconfig.build.json"), "--outDir", out]);

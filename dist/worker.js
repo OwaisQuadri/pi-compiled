@@ -28,7 +28,7 @@ async function build(spec) {
         fingerprint = await inputsFingerprint(spec);
     }
     catch (error) {
-        if (existsSync(key))
+        if (!spec.isGitVerificationRequired && existsSync(key))
             return;
         throw error;
     }
@@ -71,7 +71,7 @@ async function withPackageLock(spec) {
             refusal = await buildRefusalReason(spec);
         }
         catch (error) {
-            if (!existsSync(key))
+            if (spec.isGitVerificationRequired || !existsSync(key))
                 throw error;
         }
     }

@@ -16,6 +16,7 @@ export interface BuildSpec {
 	overrideEnv?: string;
 	timeoutMs?: number;
 	isUpstreamRequired?: boolean;
+	isGitVerificationRequired?: boolean;
 }
 
 export interface BuildProgress {
@@ -89,7 +90,8 @@ export async function isBuildNeeded(spec: BuildSpec): Promise<boolean> {
 	let fingerprint: string;
 	try {
 		fingerprint = await inputsFingerprint(spec);
-	} catch {
+	} catch (error) {
+		if (spec.isGitVerificationRequired) throw error;
 		return false;
 	}
 	let stamp = "";
@@ -109,10 +111,10 @@ export async function ensureBuilt(spec: BuildSpec, options: BuildOptions = {}): 
 		return prebuilt;
 	}
 	const key = resolve(spec.packageRoot, spec.binary);
-	const flightKey = spec.cleanupPaths === undefined ? key : `${key}\0${JSON.stringify(spec.cleanupPaths)}`;
+	const flightKey = JSON.stringify([key, spec.cleanupPaths, spec.isGitVerificationRequired === true]);
 	const existing = inFlight.get(flightKey);
 	if (existing) return follow(flightKey, existing, options);
-	if (spec.cleanupPaths === undefined && !(await isBuildNeeded(spec))) return key;
+	if (!spec.isGitVerificationRequired && spec.cleanupPaths === undefined && !(await isBuildNeeded(spec))) return key;
 	const running = inFlight.get(flightKey);
 	if (running) return follow(flightKey, running, options);
 	const listeners = new Set<(progress: BuildProgress) => void>();
@@ -160,7 +162,7 @@ async function buildLocked(spec: BuildSpec, key: string, listeners: Set<(progres
 		try {
 			refusal = await buildRefusalReason(spec);
 		} catch (error) {
-			if (!existsSync(key) || spec.cleanupPaths === undefined) throw error;
+			if (spec.isGitVerificationRequired || !existsSync(key) || spec.cleanupPaths === undefined) throw error;
 		}
 	}
 	if (refusal) throw new BuildError("build-refused", `Refused to build ${spec.binary}: ${refusal}`);

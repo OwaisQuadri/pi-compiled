@@ -57,7 +57,9 @@ export async function isBuildNeeded(spec) {
     try {
         fingerprint = await inputsFingerprint(spec);
     }
-    catch {
+    catch (error) {
+        if (spec.isGitVerificationRequired)
+            throw error;
         return false;
     }
     let stamp = "";
@@ -81,11 +83,11 @@ export async function ensureBuilt(spec, options = {}) {
         return prebuilt;
     }
     const key = resolve(spec.packageRoot, spec.binary);
-    const flightKey = spec.cleanupPaths === undefined ? key : `${key}\0${JSON.stringify(spec.cleanupPaths)}`;
+    const flightKey = JSON.stringify([key, spec.cleanupPaths, spec.isGitVerificationRequired === true]);
     const existing = inFlight.get(flightKey);
     if (existing)
         return follow(flightKey, existing, options);
-    if (spec.cleanupPaths === undefined && !(await isBuildNeeded(spec)))
+    if (!spec.isGitVerificationRequired && spec.cleanupPaths === undefined && !(await isBuildNeeded(spec)))
         return key;
     const running = inFlight.get(flightKey);
     if (running)
@@ -143,7 +145,7 @@ async function buildLocked(spec, key, listeners) {
             refusal = await buildRefusalReason(spec);
         }
         catch (error) {
-            if (!existsSync(key) || spec.cleanupPaths === undefined)
+            if (spec.isGitVerificationRequired || !existsSync(key) || spec.cleanupPaths === undefined)
                 throw error;
         }
     }

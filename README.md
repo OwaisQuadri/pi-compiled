@@ -9,7 +9,7 @@ Call `ensureBuilt` when the extension loads (`session_start`). It builds when th
 - `pi install` clones the package, so the next load builds the tool.
 - `pi update` moves the clone to a new commit and runs `git clean -fdx`, which deletes the old binary, so the next load rebuilds it.
 - A package loaded from a local path, or a clone updated with `git pull`, keeps the old binary. The stamp no longer matches, so the next load rebuilds it.
-- Without `cleanupPaths`, a load with no changes costs one `git ls-files` call and takes no lock.
+- Without `cleanupPaths` or strict Git verification, a load with no changes costs one `git ls-files` call and takes no lock.
 
 Pi runs `npm install` in a git package after install and update, but this does not use an npm `postinstall` script. Many machines set `ignore-scripts`, and a build that fails in `postinstall` makes `pi install` delete the clone.
 
@@ -42,6 +42,7 @@ interface BuildSpec {
   overrideEnv?: string;     // env var naming a prebuilt binary; skips the build
   timeoutMs?: number;       // default 600000
   isUpstreamRequired?: boolean; // build only when HEAD is the fetched upstream commit
+  isGitVerificationRequired?: boolean;
 }
 
 class BuildError extends Error { code: "build-refused" | "build-failed" | "build-timeout" | "build-busy" }
@@ -53,11 +54,13 @@ The private lock worker requires an actual Node.js executable, version 22.19.0 o
 
 The build command must start with an absolute path, so it does not depend on the caller's `PATH`. A build that exits with status 75 is reported as `build-failed`, not `build-busy`. An override binary must be an absolute path to an executable file. Build scripts must write the binary to a temporary file and rename it into place: a session that finds the binary without taking the lock uses it at once.
 
-`isBuildNeeded` returns `false` for an existing binary when Git cannot read the package. `refusalReason` returns an empty string when a build is allowed. Use the two together to ask the user before building.
+`isBuildNeeded` returns `false` for an existing binary when Git cannot read the package, unless `isGitVerificationRequired` is true; then it rejects. `refusalReason` returns an empty string when a build is allowed. Use the two together to ask the user before building.
+
+Installation adapters must set `isGitVerificationRequired: true` when calling `ensureBuilt`. It verifies Git inputs under the existing locks even for a matching binary and stamp. If Git cannot verify the package, the call rejects with `build-refused` without building, stamping or cleaning. Strict calls cannot share an in-flight build with fallback-eligible calls. Omission or `false` preserves session-loading fallback; that fallback is not proof of verified compilation. Overrides still bypass compilation and verification, so installation adapters must not use an override.
 
 ## Generated-output cleanup
 
-Set `cleanupPaths` to exact generated-output paths relative to `packageRoot`, for example `["target/build"]`. Omission keeps the legacy fast path and binary-only locking. Presence, including `[]`, acquires a stable outer package lock before the binary lock. All checks, build execution, output validation, stamp publication and deletion run within the cross-process locks.
+Set `cleanupPaths` to exact generated-output paths relative to `packageRoot`, for example `["target/build"]`. Omission keeps binary-only locking and, unless strict Git verification is required, the legacy fast path. Presence, including `[]`, acquires a stable outer package lock before the binary lock. All checks, build execution, output validation, stamp publication and deletion run within the cross-process locks.
 
 `packageLockPath(root)` returns the canonical parent directory plus `.<package-basename>.pi-package.lock`. The parent must exist. The helper does not create files. Package managers must use the same kernel lock backend and acquire this lock before mutation. A manager can hold the active-package lock while compiling a uniquely named candidate: the candidate has a different package lock. Never unlink lock files, even after owner death. Older compiler versions do not participate in this protocol; stop their builds before adopting it.
 

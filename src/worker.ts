@@ -26,7 +26,7 @@ async function build(spec: BuildSpec): Promise<void> {
 	try {
 		fingerprint = await inputsFingerprint(spec);
 	} catch (error) {
-		if (existsSync(key)) return;
+		if (!spec.isGitVerificationRequired && existsSync(key)) return;
 		throw error;
 	}
 	const refusal = await buildRefusalReason(spec);
@@ -62,7 +62,7 @@ async function withPackageLock(spec: BuildSpec): Promise<number> {
 		try {
 			refusal = await buildRefusalReason(spec);
 		} catch (error) {
-			if (!existsSync(key)) throw error;
+			if (spec.isGitVerificationRequired || !existsSync(key)) throw error;
 		}
 	}
 	if (refusal) throw new BuildError("build-refused", refusal);

@@ -9,6 +9,7 @@ export interface BuildSpec {
     overrideEnv?: string;
     timeoutMs?: number;
     isUpstreamRequired?: boolean;
+    isGitVerificationRequired?: boolean;
 }
 export interface BuildProgress {
     line: string;

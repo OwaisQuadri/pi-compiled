@@ -1,12 +1,15 @@
+export { refusalReason } from "./validation.ts";
 export interface BuildSpec {
     packageRoot: string;
     binary: string;
     buildCommand: string[];
     inputs: string[];
+    cleanupPaths?: string[];
     envAllowlist?: string[];
     overrideEnv?: string;
     timeoutMs?: number;
     isUpstreamRequired?: boolean;
+    isGitVerificationRequired?: boolean;
 }
 export interface BuildProgress {
     line: string;
@@ -23,9 +26,9 @@ export declare class BuildError extends Error {
     readonly code: BuildErrorCode;
     constructor(code: BuildErrorCode, message: string);
 }
+export declare function packageLockPath(root: string): string;
 export declare function lockPath(spec: BuildSpec): string;
 export declare function binaryPath(spec: BuildSpec): string;
 export declare function stampPath(spec: BuildSpec): string;
 export declare function isBuildNeeded(spec: BuildSpec): Promise<boolean>;
 export declare function ensureBuilt(spec: BuildSpec, options?: BuildOptions): Promise<string>;
-export declare function refusalReason(spec: BuildSpec): Promise<string>;
